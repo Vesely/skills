@@ -1,0 +1,23 @@
+README.md
+  68411bf9cd3d024f 1-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "343f78bab8f57b15f6bf928c988c7b373cea686b",
+  "prompts": {
+    "68411bf9cd3d024f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "78671fb3-37ad-4507-9a19-494544b52659",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>",
+      "messages": [],
+      "total_additions": 27,
+      "total_deletions": 0,
+      "accepted_lines": 27,
+      "overriden_lines": 0
+    }
+  }
+}
