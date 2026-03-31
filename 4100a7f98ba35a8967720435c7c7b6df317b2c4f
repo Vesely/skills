@@ -1,0 +1,21 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "4100a7f98ba35a8967720435c7c7b6df317b2c4f",
+  "prompts": {
+    "639e6e98f359ac4f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3e10ee26-8df6-4d96-ae9c-4867fe939437",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>",
+      "messages": [],
+      "total_additions": 77,
+      "total_deletions": 30,
+      "accepted_lines": 61,
+      "overriden_lines": 0
+    }
+  }
+}
