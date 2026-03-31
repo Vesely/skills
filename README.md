@@ -26,8 +26,8 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/temp-email
   ```
 
-- **skill-creator** — Capture a session's repeatable process into a reusable SKILL.md file. Interactive interview-based workflow to turn any process into an installable skill.
+- **skillify** — Capture a session's repeatable process into a reusable SKILL.md file. Interactive interview-based workflow to turn any process into an installable skill.
 
   ```
-  npx skills@latest add Vesely/skills/skill-creator
+  npx skills@latest add Vesely/skills/skillify
   ```
