@@ -68,6 +68,8 @@ If multiple signals exist, pick the one actually used in scripts / CI. For monor
 
 Apply native config for the detected package manager. Preserve existing content in all config files.
 
+If a release-age setting already exists, keep the existing value — the user may have intentionally chosen a shorter or longer period. Only add the setting if it is missing.
+
 **pnpm** — update `.npmrc` (pnpm reads release-age settings from `.npmrc`, not `pnpm-workspace.yaml`):
 ```ini
 minimum-release-age=2880
