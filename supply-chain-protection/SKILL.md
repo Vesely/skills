@@ -88,7 +88,11 @@ npmMinimalAgeGate: "2d"
 minimumReleaseAge = 172800
 ```
 
-**npm** — no native setting exists. Skip config changes; the limitation will be noted in CLAUDE.md. Rely on `sfw` plus manual version-age checks.
+**npm** (v11.10.0+) — update `.npmrc`:
+```ini
+min-release-age=2
+```
+Note: the unit is **days** (not minutes or seconds). There is a known bug where tilde (`~`) version ranges may conflict with this setting. If npm is older than v11.10.0, skip config changes and note the limitation in the summary.
 
 **Rules**:
 - Do not invent settings the package manager does not support.
