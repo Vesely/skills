@@ -1,0 +1,23 @@
+supply-chain-protection/SKILL.md
+  639e6e98f359ac4f 4-10,17,22-24,32-35,44,53,61,70-72,95-105,107,109,111,133,142,144,150,152,155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "0fda53162a717108954a5a9ee8df50a554052d87",
+  "prompts": {
+    "639e6e98f359ac4f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3e10ee26-8df6-4d96-ae9c-4867fe939437",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>",
+      "messages": [],
+      "total_additions": 44,
+      "total_deletions": 21,
+      "accepted_lines": 44,
+      "overriden_lines": 0
+    }
+  }
+}
