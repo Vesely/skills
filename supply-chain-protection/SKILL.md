@@ -116,31 +116,12 @@ Substitute all `{{...}}` placeholders with the actual detected values before wri
 ````markdown
 ## Dependency Supply-Chain Protection
 
-### Rules
+Always prefix dependency commands with `sfw` (Socket Firewall).
+Applies to install, add, update, upgrade, remove — any command that changes dependencies.
 
-1. **Always prefix dependency commands with `sfw`.**
-   Applies to install, add, update, upgrade, remove, and any command that changes dependencies.
-   Examples: `sfw pnpm add`, `sfw pnpm update`, `sfw yarn add`, `sfw yarn up`,
-   `sfw bun add`, `sfw bun update`, `sfw npm install`, `sfw npm update`.
+Examples: `sfw {{DETECTED_PM}} add <pkg>`, `sfw {{DETECTED_PM}} update <pkg>`.
 
-2. **Respect the 48-hour minimum release age.**
-   If the package manager enforces it natively, honor the config.
-   If not (e.g. npm, Yarn Classic), manually verify the publish date of the
-   target version and refuse versions newer than 48 hours.
-
-3. **Prefer mature versions.** When the latest version is too new, pick the
-   newest version that is at least 48 hours old.
-
-4. **Do not bypass these protections** unless the human explicitly instructs it.
-   If asked to bypass, explain which protection is skipped and the added risk.
-
-5. **Keep lockfiles consistent** with the project's chosen package manager.
-
-### Operational Notes
-
-- Package manager: `{{DETECTED_PM}}`
-- Release-age config: `{{CONFIG_FILE_OR_NONE}}`
-- Enforcement: `{{native | manual (sfw + age check)}}`
+Do not bypass `sfw` unless the human explicitly instructs it.
 ````
 
 **Success criteria**: CLAUDE.md contains the supply-chain section with correct operational notes (no unsubstituted placeholders).
