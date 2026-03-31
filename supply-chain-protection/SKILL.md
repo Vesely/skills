@@ -57,8 +57,8 @@ If multiple signals exist, pick the one actually used in scripts / CI. For monor
 ### 2. Install Socket Firewall
 
 - Run `command -v sfw` to check if `sfw` is already available.
-- If missing, install globally: `npm install -g @socketsecurity/cli`
-  - If the global install fails with `EACCES`, suggest `npm install -g @socketsecurity/cli --prefix ~/.local` or ask the user for their preferred approach.
+- If missing, install globally: `npm i -g sfw`
+  - If the global install fails with `EACCES`, suggest `npm i -g sfw --prefix ~/.local` or ask the user for their preferred approach.
 - Verify with `sfw --version`.
 
 **Success criteria**: `sfw` command is available and version is confirmed.
