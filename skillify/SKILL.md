@@ -1,5 +1,5 @@
 ---
-name: skill-creator
+name: skillify
 description: >
   Capture the current session's repeatable process into a reusable SKILL.md skill file.
   Use when the user wants to create a skill, save a workflow as a skill, turn a process into a reusable skill,
@@ -18,7 +18,7 @@ arguments:
   - description
 ---
 
-# Skill Creator
+# Skillify
 
 Capture this session's repeatable process into a reusable SKILL.md skill file. Call at the end of the process you want to capture, optionally with a description.
 
