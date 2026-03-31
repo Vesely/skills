@@ -46,7 +46,8 @@ Inspect the repository for lockfiles and config, starting at the repo root and f
 | Signal | Package Manager |
 |---|---|
 | `pnpm-lock.yaml` | pnpm |
-| `yarn.lock` or `.yarnrc.yml` | Yarn |
+| `yarn.lock` + `.yarnrc.yml` | Yarn Berry (2+) |
+| `yarn.lock` without `.yarnrc.yml` | Yarn Classic (1.x) |
 | `bun.lock` / `bun.lockb` / `bunfig.toml` | Bun |
 | `package-lock.json` | npm |
 
@@ -72,10 +73,12 @@ Apply native config for the detected package manager. Preserve existing content 
 minimum-release-age=2880
 ```
 
-**Yarn** — update `.yarnrc.yml`:
+**Yarn Berry (2+)** — update `.yarnrc.yml`:
 ```yaml
 npmMinimalAgeGate: "2d"
 ```
+
+**Yarn Classic (1.x)** — no native release-age setting exists. Skip config changes. Recommend the user migrate to pnpm or Bun for native release-age enforcement. Note this in the summary.
 
 **Bun** — update `bunfig.toml`:
 ```toml
@@ -116,13 +119,14 @@ Substitute all `{{...}}` placeholders with the actual detected values before wri
 ### Rules
 
 1. **Always prefix dependency commands with `sfw`.**
-   Examples: `sfw pnpm add`, `sfw yarn add`, `sfw bun add`, `sfw npm install`.
-   Applies to install, update, remove, and any command that changes dependencies.
+   Applies to install, add, update, upgrade, remove, and any command that changes dependencies.
+   Examples: `sfw pnpm add`, `sfw pnpm update`, `sfw yarn add`, `sfw yarn up`,
+   `sfw bun add`, `sfw bun update`, `sfw npm install`, `sfw npm update`.
 
 2. **Respect the 48-hour minimum release age.**
    If the package manager enforces it natively, honor the config.
-   If not (e.g. npm), manually verify the publish date of the target version
-   and refuse versions newer than 48 hours.
+   If not (e.g. npm, Yarn Classic), manually verify the publish date of the
+   target version and refuse versions newer than 48 hours.
 
 3. **Prefer mature versions.** When the latest version is too new, pick the
    newest version that is at least 48 hours old.
