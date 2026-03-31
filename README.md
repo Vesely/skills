@@ -1,6 +1,6 @@
 # Skills
 
-A collection of Claude Code skills for file hosting, disposable email, and more.
+A collection of Claude Code skills for file hosting, disposable email, skill creation, and more.
 
 ## Install
 
@@ -24,4 +24,10 @@ Or via [skills.sh](https://skills.sh).
 
   ```
   npx skills@latest add Vesely/skills/temp-email
+  ```
+
+- **skillify** — Capture a session's repeatable process into a reusable SKILL.md file. Interactive interview-based workflow to turn any process into an installable skill.
+
+  ```
+  npx skills@latest add Vesely/skills/skillify
   ```
