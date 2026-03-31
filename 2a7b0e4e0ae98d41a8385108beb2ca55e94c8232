@@ -1,0 +1,25 @@
+article-draft.md
+  639e6e98f359ac4f 1-69
+supply-chain-protection/SKILL.md
+  639e6e98f359ac4f 91-95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "2a7b0e4e0ae98d41a8385108beb2ca55e94c8232",
+  "prompts": {
+    "639e6e98f359ac4f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3e10ee26-8df6-4d96-ae9c-4867fe939437",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>",
+      "messages": [],
+      "total_additions": 80,
+      "total_deletions": 7,
+      "accepted_lines": 74,
+      "overriden_lines": 0
+    }
+  }
+}
