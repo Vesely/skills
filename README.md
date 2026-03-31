@@ -1,6 +1,6 @@
 # Skills
 
-A collection of Claude Code skills for file hosting, disposable email, skill creation, and more.
+A collection of Claude Code skills for file hosting, disposable email, supply-chain security, skill creation, and more.
 
 ## Install
 
@@ -25,6 +25,16 @@ Or via [skills.sh](https://skills.sh).
   ```
   npx skills@latest add Vesely/skills/temp-email
   ```
+
+### Security
+
+- **supply-chain-protection** — One-time setup to harden dependency management against supply-chain attacks. Detects your package manager (npm, pnpm, Yarn, Bun), installs Socket Firewall, configures a 48-hour minimum package release age, and writes persistent rules to CLAUDE.md.
+
+  ```
+  npx skills@latest add Vesely/skills/supply-chain-protection
+  ```
+
+### Meta
 
 - **skillify** — Capture a session's repeatable process into a reusable SKILL.md file. Interactive interview-based workflow to turn any process into an installable skill.
 
