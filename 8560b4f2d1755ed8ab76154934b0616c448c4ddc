@@ -1,0 +1,25 @@
+context-audit/SKILL.md
+  3b510f48b03a2665 1-155
+context-audit/README.md
+  3b510f48b03a2665 1-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "8560b4f2d1755ed8ab76154934b0616c448c4ddc",
+  "prompts": {
+    "3b510f48b03a2665": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "69252633-6a5b-48c5-88d3-68f23b994729",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "David Veselý",
+      "messages": [],
+      "total_additions": 162,
+      "total_deletions": 0,
+      "accepted_lines": 162,
+      "overriden_lines": 0
+    }
+  }
+}
