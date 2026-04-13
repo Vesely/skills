@@ -44,6 +44,12 @@ Or via [skills.sh](https://skills.sh).
 
 ### Meta
 
+- **use-skill** — Fetch and execute a remote skill on-the-fly without installing it. Supports skills.sh search, GitHub shorthand, direct URLs, and repo browsing.
+
+  ```
+  npx skills@latest add Vesely/skills/use-skill
+  ```
+
 - **skillify** — Capture a session's repeatable process into a reusable SKILL.md file. Interactive interview-based workflow to turn any process into an installable skill.
 
   ```
