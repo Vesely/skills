@@ -80,6 +80,31 @@ Check settings.json for:
 | autocompact_percentage_override | Missing or > 80 | 75 |
 | BASH_MAX_OUTPUT_LENGTH (env) | At default (30-50K) | 150000 |
 
+### Hooks
+
+Check settings.json for `hooks` configuration. For each hook:
+- Flag hooks that run slow commands (network calls, heavy builds)
+- Flag hooks with no timeout configured
+- Check if any hook runs on high-frequency events (e.g., every tool call)
+  where latency compounds
+
+### Memory Files
+
+Glob `~/.claude/projects/*/memory/*.md`. For each memory directory:
+- Count total files and estimate total lines
+- Flag stale memories (check if referenced project paths still exist)
+- Flag memories > 50 lines (memories should be concise pointers, not docs)
+- Flag memory directories with > 20 files (index bloat)
+
+### .claudeignore
+
+Check if `.claudeignore` exists in the project root. If missing and the
+project has large generated/indexed directories, recommend creating one.
+Key patterns to check for:
+- Large data directories (fixtures, seeds, dumps)
+- Generated docs (typedoc, javadoc, storybook-static)
+- Monorepo packages the user isn't actively working on
+
 ### File Permissions
 
 Check settings.json for `permissions.deny` rules. If missing, check
@@ -87,7 +112,8 @@ whether bloat directories exist in the project:
 
 | If this exists... | Should deny... |
 |-------------------|---------------|
-| package.json | node_modules, dist, build, .next, coverage |
+| .git | .git |
+| package.json | node_modules, dist, build, .next, .nuxt, .cache, coverage |
 | Cargo.toml | target |
 | go.mod | vendor |
 | pyproject.toml / requirements.txt | __pycache__, .venv, *.egg-info |
@@ -108,6 +134,10 @@ Score starts at 100. Deduct per issue:
 | Skill > 500 lines | -10 each |
 | Per MCP server | -3 each |
 | No deny rules + bloat dirs exist | -10 |
+| Hook with no timeout on frequent event | -5 each |
+| Stale or oversized memory files | -5 |
+| Memory directory > 20 files | -5 |
+| Missing .claudeignore + large dirs exist | -5 |
 
 Floor at 0. Output this format:
 
@@ -148,6 +178,9 @@ After the report:
 - Show you a cleaned-up CLAUDE.md with the flagged rules removed
 - Add the missing settings.json configs
 - Add permissions.deny rules for build artifacts
+- Add timeouts to hooks missing them
+- Clean up stale memory files
+- Generate a .claudeignore for this project
 - Show which skills to compress"
 
 Auto-apply settings.json and permissions.deny (safe, reversible).

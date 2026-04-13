@@ -34,6 +34,14 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/supply-chain-protection
   ```
 
+### Diagnostics
+
+- **context-audit** — Audit your Claude Code setup for token waste and context bloat. Checks MCP servers, CLAUDE.md rules, skills, settings, and file permissions. Returns a health score with specific fixes.
+
+  ```
+  npx skills@latest add Vesely/skills/context-audit
+  ```
+
 ### Meta
 
 - **skillify** — Capture a session's repeatable process into a reusable SKILL.md file. Interactive interview-based workflow to turn any process into an installable skill.
