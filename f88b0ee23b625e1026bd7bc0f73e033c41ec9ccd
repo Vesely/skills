@@ -1,0 +1,38 @@
+README.md
+  7ffed0f55ae2a1bf 37-44
+context-audit/SKILL.md
+  7ffed0f55ae2a1bf 83-107,115-116,137-140,181-183
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "f88b0ee23b625e1026bd7bc0f73e033c41ec9ccd",
+  "prompts": {
+    "6fdf2e84cc22310b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bc2cc607-20f0-4542-aa71-69d924e02929",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "David Veselý",
+      "messages": [],
+      "total_additions": 1478,
+      "total_deletions": 83,
+      "accepted_lines": 1395,
+      "overriden_lines": 0
+    },
+    "7ffed0f55ae2a1bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4b41b399-65f1-4e5b-b47b-9fdc73c54e96",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "David Veselý",
+      "messages": [],
+      "total_additions": 42,
+      "total_deletions": 1,
+      "accepted_lines": 42,
+      "overriden_lines": 0
+    }
+  }
+}
