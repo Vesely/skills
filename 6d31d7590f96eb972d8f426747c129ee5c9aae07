@@ -1,0 +1,49 @@
+use-skill/SKILL.md
+  cbd658b1077e61dd 63-72,75-76,78,156-172,174-190,192-200,202,204,206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.8",
+  "base_commit_sha": "6d31d7590f96eb972d8f426747c129ee5c9aae07",
+  "prompts": {
+    "0eae5b7da82dcf07": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a188ff0e-440a-4651-9f3f-30aca4b1e954",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "David Veselý",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "6fdf2e84cc22310b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bc2cc607-20f0-4542-aa71-69d924e02929",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "David Veselý",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1192,
+      "overriden_lines": 0
+    },
+    "cbd658b1077e61dd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "422c4f6f-4879-49ea-829e-dbb6e0fa6cc6",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "David Veselý",
+      "messages": [],
+      "total_additions": 64,
+      "total_deletions": 14,
+      "accepted_lines": 59,
+      "overriden_lines": 0
+    }
+  }
+}
