@@ -1,0 +1,23 @@
+README.md
+  bae142e111437232 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "cc166932dde2b04e64289e54b31901a5a3d60472",
+  "prompts": {
+    "bae142e111437232": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0f76c7d8-06cd-4ba3-8233-807c9b58c0ed",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "David Veselý",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}
