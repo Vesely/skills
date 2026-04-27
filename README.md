@@ -12,18 +12,24 @@ Or via [skills.sh](https://skills.sh).
 
 ## Skills
 
-### Utilities
+### Meta
 
-- **catbox** — Upload files to catbox.moe for free, anonymous hosting with direct links. No account needed.
-
-  ```
-  npx skills@latest add Vesely/skills/catbox
-  ```
-
-- **temp-email** — Create disposable email inboxes via tempmail.lol. Rotating domains, no API key, just curl. Great for E2E tests and verification flows.
+- **use-skill** — Fetch and execute a remote skill on-the-fly without installing it. Supports skills.sh search, GitHub shorthand, direct URLs, and repo browsing.
 
   ```
-  npx skills@latest add Vesely/skills/temp-email
+  npx skills@latest add Vesely/skills/use-skill
+  ```
+
+- **skillify** — Capture a session's repeatable process into a reusable SKILL.md file. Interactive interview-based workflow to turn any process into an installable skill.
+
+  ```
+  npx skills@latest add Vesely/skills/skillify
+  ```
+
+- **cursor-agent** — Delegate a task to Cursor's headless CLI for a second opinion from a non-Claude model. Useful for code reviews, plan critiques, and cross-checking work with GPT, Gemini, or a different Claude tier.
+
+  ```
+  npx skills@latest add Vesely/skills/cursor-agent
   ```
 
 ### Security
@@ -42,16 +48,16 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/context-audit
   ```
 
-### Meta
+### Utilities
 
-- **use-skill** — Fetch and execute a remote skill on-the-fly without installing it. Supports skills.sh search, GitHub shorthand, direct URLs, and repo browsing.
-
-  ```
-  npx skills@latest add Vesely/skills/use-skill
-  ```
-
-- **skillify** — Capture a session's repeatable process into a reusable SKILL.md file. Interactive interview-based workflow to turn any process into an installable skill.
+- **catbox** — Upload files to catbox.moe for free, anonymous hosting with direct links. No account needed.
 
   ```
-  npx skills@latest add Vesely/skills/skillify
+  npx skills@latest add Vesely/skills/catbox
+  ```
+
+- **temp-email** — Create disposable email inboxes via tempmail.lol. Rotating domains, no API key, just curl. Great for E2E tests and verification flows.
+
+  ```
+  npx skills@latest add Vesely/skills/temp-email
   ```
