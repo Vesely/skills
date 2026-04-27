@@ -12,7 +12,7 @@ Or via [skills.sh](https://skills.sh).
 
 ## Skills
 
-### Meta
+### Workflow
 
 - **use-skill** — Fetch and execute a remote skill on-the-fly without installing it. Supports skills.sh search, GitHub shorthand, direct URLs, and repo browsing.
 
