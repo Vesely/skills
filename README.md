@@ -61,3 +61,9 @@ Or via [skills.sh](https://skills.sh).
   ```
   npx skills@latest add Vesely/skills/temp-email
   ```
+
+- **ai-gateway** — Generate text and images from the CLI via the Vercel AI Gateway. One key, hundreds of models (Nano Banana, Flux, Imagen, Claude, GPT, Grok). Wraps [`@vesely/ai-gateway-cli`](https://github.com/Vesely/ai-gateway-cli).
+
+  ```
+  npx skills@latest add Vesely/skills/ai-gateway
+  ```
