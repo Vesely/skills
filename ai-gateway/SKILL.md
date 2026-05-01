@@ -22,7 +22,7 @@ A thin wrapper around the `ai-gateway` CLI (https://vercel.com/ai-gateway) for o
 ## Defaults
 
 - Text model: `xai/grok-4.1-fast-non-reasoning` (cheap + capable)
-- Image model: `bfl/flux-2-flex`
+- Image model: `google/imagen-4.0-fast-generate-001`
 - Video model: `xai/grok-imagine-video`
 - Override per-call with `-m <model-id>`. Browse with `ai-gateway models --type image|language|video`.
 
