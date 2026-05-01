@@ -1,0 +1,23 @@
+ai-gateway/SKILL.md
+  df38d39246421433 25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "e0bf92aab54284b2141c8c2cd3ed32f4a52d529b",
+  "prompts": {
+    "df38d39246421433": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a41fef09-f9aa-48b9-8fab-cac780e0ddc9",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "David Veselý",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}
