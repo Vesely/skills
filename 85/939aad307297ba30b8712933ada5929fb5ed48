@@ -1,0 +1,25 @@
+ai-gateway/README.md
+  df38d39246421433 1-17
+README.md
+  df38d39246421433 64-69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "85939aad307297ba30b8712933ada5929fb5ed48",
+  "prompts": {
+    "df38d39246421433": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a41fef09-f9aa-48b9-8fab-cac780e0ddc9",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "David Veselý",
+      "messages": [],
+      "total_additions": 23,
+      "total_deletions": 0,
+      "accepted_lines": 23,
+      "overriden_lines": 0
+    }
+  }
+}
