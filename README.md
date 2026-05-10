@@ -32,6 +32,12 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/cursor-agent
   ```
 
+- **tldr** — Compress the previous assistant response into a one-line TL;DR plus exactly three terse next-step labels (slash commands welcome). Triggers on `/tldr`, `/recap`, "tldr", "what should I do next".
+
+  ```
+  npx skills@latest add Vesely/skills/tldr
+  ```
+
 ### Security
 
 - **supply-chain-protection** — One-time setup to harden dependency management against supply-chain attacks. Detects your package manager (npm, pnpm, Yarn, Bun), installs Socket Firewall, configures a 48-hour minimum package release age, and writes persistent rules to CLAUDE.md.
