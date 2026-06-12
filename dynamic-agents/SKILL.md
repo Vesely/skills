@@ -1,6 +1,6 @@
 ---
 name: dynamic-agents
-description: Orchestrate a complex task across multiple agents with cost-aware model routing. Decomposes the task, routes each subtask to the cheapest model that handles it well (session model for hard work, Sonnet for mechanical work, GPT-5.5 or newer via Codex CLI for cross-model review), picks fan-out vs team topology, presents the plan for approval, then executes. Use whenever the user invokes /dynamic-agents, says "dynamic agents" or "fan out dynamic", or hands over a large multi-part task (feature spanning several subsystems, audit, migration, research plus implementation) and wants top-tier quality at reasonable cost.
+description: Orchestrate a complex task across multiple agents with cost-aware model routing. Decomposes the task, routes each subtask to the cheapest model that handles it well (session model for hard work, Sonnet for mechanical work, GPT-5.5 or newer via Codex CLI for cross-model review), picks fan-out vs team topology, presents the plan (waiting for approval only on large or atypical runs), then executes. Use whenever the user invokes /dynamic-agents, says "dynamic agents" or "fan out dynamic", or hands over a large multi-part task (feature spanning several subsystems, audit, migration, research plus implementation) and wants top-tier quality at reasonable cost.
 ---
 
 # Dynamic Agents
@@ -27,17 +27,22 @@ Break the task into subtasks with explicit boundaries: input, required output, w
 
 ## 3. Pick topology
 
-Default to phased fan-out (understand, design, implement, review) with you synthesizing between phases. Use the Agent tool for up to ~4 agents; use the Workflow tool when orchestration genuinely needs structure (pipelines, loops, verification rounds, many parallel branches) — the user's approval of a checkpoint plan that names Workflow counts as their explicit Workflow opt-in. Use a team (TeamCreate + SendMessage) only when roles must persist and message each other across multiple rounds; everywhere else a team is overhead, and "the subtasks are different roles" is not a reason. Give parallel mutating agents disjoint file ownership; use `isolation: "worktree"` only when overlapping writes are unavoidable.
+Default to phased fan-out (understand, design, implement, review) with you synthesizing between phases. Use the Agent tool for up to ~4 agents; use the Workflow tool when orchestration genuinely needs structure (pipelines, loops, verification rounds, many parallel branches) — explicit invocation of this skill, or the user's approval of a plan that names Workflow, counts as their explicit Workflow opt-in. Use a team (TeamCreate + SendMessage) only when roles must persist and message each other across multiple rounds; everywhere else a team is overhead, and "the subtasks are different roles" is not a reason. Give parallel mutating agents disjoint file ownership; use `isolation: "worktree"` only when overlapping writes are unavoidable.
 
-## 4. Checkpoint before spending
+## 4. Show the plan, gate only what's risky
 
-Present a compact plan and wait for approval before launching anything:
+Always present a compact plan before launching — it costs nothing and lets the user catch a misrouted subtask cheaply:
 
 ```
 | # | Subtask | Topology | Model | Why this tier |
 ```
 
-plus one line on phases and total agent count. Skip the wait only if the user pre-approved in this conversation (e.g. "run it right away, no need to confirm"). The plan is where the user catches a misrouted subtask cheaply, before tokens are spent.
+plus one line on phases and total agent count. For a small, typical plan (a handful of agents, fan-out only, no file mutation), launch right after showing it. Wait for explicit approval only when:
+
+- the scale is large or open-ended: more than ~5 agents, Workflow loops, unknown-size discovery
+- the topology is atypical: a team, worktrees, parallel file mutation
+- the skill auto-triggered from task phrasing rather than being explicitly invoked — approval then also serves as the user's Workflow opt-in
+- the decomposition surfaced a question only the user can answer
 
 ## 5. Execute, synthesize, verify
 
