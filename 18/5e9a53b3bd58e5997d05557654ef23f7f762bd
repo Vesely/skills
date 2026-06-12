@@ -1,0 +1,21 @@
+dynamic-agents/README.md
+  s_2d75b244f5a5a6::t_b1084318006c68 1-13
+README.md
+  s_2d75b244f5a5a6::t_e9209f3d76adb9 41-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "185e9a53b3bd58e5997d05557654ef23f7f762bd",
+  "prompts": {},
+  "sessions": {
+    "s_2d75b244f5a5a6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e84b7fc0-3223-4fe9-90d0-2ab7c26c0751",
+        "model": "claude-fable-5"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
