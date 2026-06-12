@@ -38,6 +38,12 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/tldr
   ```
 
+- **dynamic-agents** — Orchestrate complex tasks across multiple agents with cost-aware model routing: session model for judgment-heavy work, Sonnet for mechanical work, GPT-5.5+ via Codex CLI for cross-model review. Presents a checkpoint plan before spending tokens.
+
+  ```
+  npx skills@latest add Vesely/skills/dynamic-agents
+  ```
+
 ### Security
 
 - **supply-chain-protection** — One-time setup to harden dependency management against supply-chain attacks. Detects your package manager (npm, pnpm, Yarn, Bun), installs Socket Firewall, configures a 48-hour minimum package release age, and writes persistent rules to CLAUDE.md.

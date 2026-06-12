@@ -1,0 +1,31 @@
+{
+  "skill_name": "dynamic-agents",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "I want to add a CSV export option to the reporting module of my web app. There is an existing PDF export service under src/services/export/ that the new CSV exporter should mirror, it needs to be wired into the export menu component AND the report detail view, and the user-facing docs page needs updating. Split this work between multiple agents for me. Present your agent plan first and stop there, do not execute anything yet.",
+      "expected_output": "A decomposition with an agent plan table: exporter design/implementation routed to the session model (no model override), mechanical docs update and recon routed to sonnet, a Codex (GPT) cross-model review pass included, phased fan-out (not a team), and an explicit wait for approval.",
+      "files": [],
+      "assertions": [
+        "Plan contains a per-subtask routing table (or equivalent) that assigns a model/tier to each agent",
+        "Judgment-heavy work (exporter design/implementation, final synthesis) is left on the session model with no model override",
+        "Mechanical subtasks (docs update, recon/fact gathering) are routed to Sonnet",
+        "Plan includes a Codex/GPT cross-model review pass on the implementation",
+        "Topology is phased fan-out (not a persistent team) and the plan explicitly stops to wait for approval"
+      ]
+    },
+    {
+      "id": 1,
+      "prompt": "Audit all API route handlers under src/api/ in this repo for missing tenant scoping (handlers that should go through the requireTenant middleware but don't). There are a few dozen handler files. Fan out agents to cover it and give me a verified report. Show me your orchestration plan first and stop, do not run the audit yet.",
+      "expected_output": "A plan using Workflow or parallel agents: cheap (sonnet) scanners partitioned over handler files, judgment-heavy verification of suspected findings on the session model, adversarial verification before reporting, a coverage statement, and a checkpoint waiting for approval.",
+      "files": [],
+      "assertions": [
+        "Plan partitions the handler files across parallel scanner agents (fan-out, Agent tool or Workflow)",
+        "Cheap scanning/grepping work is routed to Sonnet",
+        "Suspected findings are verified on the session model and/or adversarially verified before being reported as fact",
+        "Plan addresses coverage (states what will and will not be covered, or how completeness is ensured)",
+        "Plan explicitly stops at a checkpoint to wait for user approval before spending tokens"
+      ]
+    }
+  ]
+}
