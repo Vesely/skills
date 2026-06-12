@@ -1,0 +1,21 @@
+dynamic-agents/SKILL.md
+  s_2d75b244f5a5a6::t_3732e90ef1b1e2 3
+  s_2d75b244f5a5a6::t_7c1176fc493d06 30
+  s_2d75b244f5a5a6::t_9f4fed6a77ec20 32,34,40-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "aac50842af217d50f01f52590e6d77fbf0741023",
+  "prompts": {},
+  "sessions": {
+    "s_2d75b244f5a5a6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e84b7fc0-3223-4fe9-90d0-2ab7c26c0751",
+        "model": "claude-fable-5"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
