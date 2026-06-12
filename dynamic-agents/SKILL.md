@@ -39,7 +39,7 @@ Always present a compact plan before launching — it costs nothing and lets the
 
 plus one line on phases and total agent count. For a small, typical plan (a handful of agents, fan-out only, no file mutation), launch right after showing it. Wait for explicit approval only when:
 
-- the scale is large or open-ended: more than ~5 agents, Workflow loops, unknown-size discovery
+- the scale is large or open-ended: more than ~10 agents, Workflow loops, unknown-size discovery
 - the topology is atypical: a team, worktrees, parallel file mutation
 - the skill auto-triggered from task phrasing rather than being explicitly invoked — approval then also serves as the user's Workflow opt-in
 - the decomposition surfaced a question only the user can answer
