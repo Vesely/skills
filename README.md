@@ -1,6 +1,6 @@
 # Skills
 
-A collection of Claude Code skills for file hosting, disposable email, supply-chain security, skill creation, and more.
+A collection of Claude Code skills for file hosting, disposable email, supply-chain security, skill creation, code-style alignment, and more.
 
 ## Install
 
@@ -42,6 +42,14 @@ Or via [skills.sh](https://skills.sh).
 
   ```
   npx skills@latest add Vesely/skills/dynamic-agents
+  ```
+
+### Code quality
+
+- **code-style** — Align newly written or changed code with the surrounding project's conventions — formatting, naming, imports, comments, idioms — learned from the codebase itself. Auto-detects your diff (uncommitted, or branch vs. the default branch), runs the project's own formatters/linters first, then fixes what tooling can't, with surgical, behavior-preserving edits. Works in any language or framework.
+
+  ```
+  npx skills@latest add Vesely/skills/code-style
   ```
 
 ### Security

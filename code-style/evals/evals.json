@@ -1,0 +1,83 @@
+{
+  "skill_name": "code-style",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I just added a products module to this shop-lib package. Can you make sure my changes match the rest of the codebase's style before I commit?",
+      "expected_output": "The off-style uncommitted changes (src/products.js + the appended line in src/index.js) are aligned to the project's conventions: 2-space indent, single quotes, semicolons, const/let (no var), descriptive callback params, camelCase locals. Pre-existing files are untouched and behavior is unchanged.",
+      "files": ["evals/files/eval-1-js-uncommitted/setup.sh"],
+      "expectations": [
+        "src/products.js uses 2-space indentation, not 4-space (matches the rest of src/)",
+        "src/products.js uses single quotes, not double quotes",
+        "Statements in src/products.js end with semicolons",
+        "src/products.js uses const/let and contains no `var`",
+        "Callback parameters in src/products.js are descriptive words, not single characters (no `.map(p =>` or `.reduce((a, b) =>`)",
+        "Local variables in src/products.js are camelCase, not snake_case (no total_price / with_tax)",
+        "The appended re-export line in src/index.js was aligned to single quotes + semicolon",
+        "The pre-existing files src/users.js, src/orders.js, src/utils.js were NOT modified",
+        "Behavior is unchanged: the exported function names and their computed logic are the same, only style/formatting/local-naming changed"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I wrote a new pricing.py for our store package. Please make it consistent with how the rest of the code is written.",
+      "expected_output": "store/pricing.py is aligned to the project's Python conventions learned from store/users.py and store/orders.py: 4-space indent, double quotes, snake_case, type hints on signatures, f-strings, and docstrings. Behavior unchanged; baseline modules untouched.",
+      "files": ["evals/files/eval-2-python-uncommitted/setup.sh"],
+      "expectations": [
+        "store/pricing.py uses 4-space indentation, not 2-space (matches the rest of the package)",
+        "Function and variable names in store/pricing.py are snake_case, not camelCase (no calcTotal / lineItems / withTax)",
+        "store/pricing.py uses double quotes, not single quotes (matches the project)",
+        "Function signatures in store/pricing.py have type hints, like store/users.py and store/orders.py",
+        "String formatting in store/pricing.py uses f-strings, not %-formatting or .format()",
+        "store/pricing.py functions have docstrings in the project's style (the neighbor modules all have them)",
+        "The pre-existing files store/users.py and store/orders.py were NOT modified",
+        "Behavior is unchanged: the functions still compute the same total/summary, only naming/formatting/quotes/types/docstrings were adjusted"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I'm on my feature/add-widget branch and about to open a PR. Go over what I changed and make the style match the rest of the app.",
+      "expected_output": "Despite a clean working tree, the skill detects no uncommitted changes and compares the branch against main, finds the committed src/widget.js, and aligns it to the baseline files' style (2-space indent, single quotes, semicolons, const/let, descriptive params, camelCase). Baseline files untouched; behavior unchanged.",
+      "files": ["evals/files/eval-3-js-branch/setup.sh"],
+      "expectations": [
+        "The skill correctly determined there were no uncommitted changes and compared the branch against the default branch (main) to find what changed",
+        "src/widget.js now uses 2-space indentation, single quotes, and semicolons (matches src/cart.js and src/format.js)",
+        "src/widget.js uses const/let and contains no `var`",
+        "Single-character callback parameters in src/widget.js were renamed to descriptive names (no `.map(i =>` or `.filter(x =>`)",
+        "Local variables in src/widget.js are camelCase, not snake_case (no visible_items)",
+        "The pre-existing files src/cart.js and src/format.js were NOT modified",
+        "Behavior is unchanged: buildWidget still returns the same { ids, count } shape with the same values"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I added a geometry helper to this package. Can you make it match how the rest of the code is written before I push?",
+      "expected_output": "src/geometry.js is converted to the project's unusual 'house style' learned from src/math.js and src/strings.js: `function` declarations (not arrow-const) with a space before the parens, no semicolons, 2-space indent, and descriptive parameter names instead of single-char a/b. Pre-existing files untouched; behavior unchanged. This eval checks the core principle of matching the project's idioms even when they differ from mainstream defaults.",
+      "files": ["evals/files/eval-A-house-style/setup.sh"],
+      "expectations": [
+        "src/geometry.js uses `function` declarations for its exports (export function distance ...), not arrow-const, matching the house style",
+        "src/geometry.js puts a space before the function parens (e.g. `function distance (`), matching the neighbor files",
+        "src/geometry.js has NO semicolons, matching the StandardJS house style used by the neighbors",
+        "src/geometry.js uses 2-space indentation, not 4-space",
+        "The single-character parameters `a`/`b` were renamed to descriptive names",
+        "The pre-existing files src/math.js and src/strings.js were NOT modified",
+        "Behavior is unchanged: distance returns sqrt(dx*dx + dy*dy) and midpoint returns the averaged point"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I just added a variance function to analytics/aggregate.py. Please make my change consistent with the rest of the codebase.",
+      "expected_output": "Only the newly added function in analytics/aggregate.py is aligned to the clean house style (snake_case, 4-space, type hints, docstring, descriptive locals). The pre-existing committed legacy function in the same file is left untouched, and no other file changes. This eval checks the surgical / no-over-reach guarantee.",
+      "files": ["evals/files/eval-B-surgical/setup.sh"],
+      "expectations": [
+        "The newly added function was renamed to snake_case (calc_variance), not left camelCase",
+        "The newly added function uses 4-space indentation, matching the clean code in the package",
+        "The newly added function has a type-hinted signature and a docstring, like mean() and describe()",
+        "Single-character locals in the new function (m, x) were renamed to descriptive names",
+        "The pre-existing committed legacy function `legacyMean` was left UNCHANGED (still camelCase, still 2-space indented, still uses `for v in values`)",
+        "The pre-existing file analytics/summary.py was NOT modified",
+        "Behavior is unchanged: the new function still computes population variance (mean of squared deviations from the mean)"
+      ]
+    }
+  ]
+}
