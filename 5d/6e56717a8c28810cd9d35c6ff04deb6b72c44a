@@ -1,0 +1,21 @@
+handsfree/SKILL.md
+  s_bb191df2072dd9::t_2f1804e9cbe4c9 9,16,76-78
+handsfree/say-listen.sh
+  s_bb191df2072dd9::t_c124d98c24032e 2-3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "5d6e56717a8c28810cd9d35c6ff04deb6b72c44a",
+  "prompts": {},
+  "sessions": {
+    "s_bb191df2072dd9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a1ae03c-7d5e-4bf3-9282-50d09c873f0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
