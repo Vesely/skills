@@ -1,5 +1,6 @@
 #!/bin/zsh
-# say-listen.sh "<czech text>"  —  one hands-free turn of the voice loop.
+# say-listen.sh "<reply text>"  —  one hands-free turn of the voice loop.
+# Pass the reply in whatever language the user is using; gemini-say.ts auto-detects.
 #
 #   1) Speak the text via Gemini TTS (blocks until afplay finishes). The `say`
 #      helper also ducks background audio (Spotify/Music/browser) for that span.

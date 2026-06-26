@@ -6,14 +6,14 @@ description: Hands-free voice loop for driving Claude by voice. Combines the say
 # handsfree
 
 A super-lightweight wrapper around two existing skills — **`say`** (Gemini TTS,
-Czech voice Charon) and **`wispr`** (Wispr Flow dictation) — plus a cmux
+voice Charon) and **`wispr`** (Wispr Flow dictation) — plus a cmux
 focus-pull and a small **appendix-stop** keyword listener, so the user can run a
 whole Claude session by voice while away from the keyboard (e.g. driving). One
 script, `say-listen.sh`, does a full turn; `appendix-stop.sh` closes it by voice.
 
 ## What one turn does
 
-`say-listen.sh "<short czech text>"`:
+`say-listen.sh "<short reply text>"`:
 
 1. **Speaks** the text via `~/.claude/skills/say/gemini-say.ts` (blocks until the
    audio finishes playing — `afplay` is synchronous). The `say` helper also ducks
@@ -73,7 +73,9 @@ zsh ~/.claude/skills/handsfree/say-listen.sh "<spoken reply>"
 
 Spoken-reply rules (same as the `say` skill):
 - Short: 1–4 sentences. Summarize; don't read everything.
-- Plain Czech, **no markdown, no code, no URLs, no symbols** — it's read aloud.
+- Write the reply **in whatever language the user is using in this session** (the
+  `say` helper auto-detects the language from the text — do not hardcode one).
+- Plain text, **no markdown, no code, no URLs, no symbols** — it's read aloud.
 - If a real decision is needed, end with a clear spoken question; the mic is
   already armed for the answer.
 - The on-screen text reply can stay fuller (the user can read it later); the
