@@ -1,6 +1,6 @@
 ---
 name: say
-description: Summarize and simplify the last agent message, then speak it aloud via Gemini TTS (Vertex AI, Czech voice Charon). Falls back to sag/macOS say.
+description: Summarize and simplify the last agent message, then speak it aloud via Gemini TTS (Vertex AI, voice Charon), in whatever language the user is using in the session. Falls back to sag/macOS say.
 allowed-tools:
   - Bash(bun:*)
   - Bash(sag:*)
@@ -29,13 +29,13 @@ Boil the previous assistant message down to a short spoken gist. Be brief, but *
 2. **Any decision or input needed from the user** (and the options, in a few words).
 3. **What's next.**
 
-Aim for **1–2 sentences (~15–30 words)** when it's just an outcome. If there's a decision or a next step, add one more short sentence for it (≤3 sentences total). Drop markdown, code, lists, caveats, and hedging. Detect the language of the message (e.g. Czech vs English).
+Aim for **1–2 sentences (~15–30 words)** when it's just an outcome. If there's a decision or a next step, add one more short sentence for it (≤3 sentences total). Drop markdown, code, lists, caveats, and hedging. Match the language of the source message and speak in that same language (don't hardcode one).
 
 **Success criteria**: A terse plain-text recap (≤3 sentences, no markdown/symbols) in the original language that still conveys what changed and any pending decision or next step.
 
 ### 2. Speak it via Gemini TTS
 
-Run the helper — it synthesizes Czech speech and auto-plays via `afplay`:
+Run the helper — it synthesizes speech and auto-plays via `afplay`:
 
 ```bash
 bun run ~/.claude/skills/say/gemini-say.ts "<recap, plain sentences>"
@@ -47,7 +47,7 @@ bun run ~/.claude/skills/say/gemini-say.ts "<recap, plain sentences>"
 - Plays by default; `--no-play` writes the file only, `-o <path>` sets the output path.
 - **Audio ducking:** during playback the helper pauses other audio (Spotify / Music / browser / YouTube) via `nowplaying-cli` and resumes only what it paused — so the voice isn't a mishmash with background media. No-op if `nowplaying-cli` (Homebrew, optional) is absent or nothing is playing.
 
-**Fallbacks** (only if the helper errors): `sag --speed 1.1 --lang cs "<recap>"` (ElevenLabs — may be quota-exhausted) or `say -v Zuzana -r 188 "<recap>"` (macOS, low quality).
+**Fallbacks** (only if the helper errors): `sag --speed 1.1 "<recap>"` (ElevenLabs — may be quota-exhausted; add `--lang <code>` to force a language) or `say -r 188 "<recap>"` (macOS, low quality; add `-v <voice>` for a language-specific voice).
 
 **Success criteria**: the helper prints `OK …` and audio plays. Reply with one short confirmation line; do NOT embed a `MEDIA:` reference.
 

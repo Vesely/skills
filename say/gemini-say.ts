@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Gemini TTS (Vertex AI) say-helper. Self-contained: mints a service-account
-// OAuth token via crypto (no npm deps), synthesizes Czech speech, plays via afplay.
+// OAuth token via crypto (no npm deps), synthesizes speech (language auto-detected from text), plays via afplay.
 // Creds: point GEMINI_SAY_ENV at a file containing GOOGLE_VERTEX_PROJECT,
 // GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY (a Vertex service account).
 // Defaults to ~/.config/gemini-say.env. No secrets are stored in this file.
