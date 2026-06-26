@@ -1,0 +1,24 @@
+wispr/SKILL.md
+  s_c7f80ca9cbc992::t_cb4dc5bc54ac52 3
+  s_c7f80ca9cbc992::t_4e9705d0d25a2e 1-2,4-9,12-45
+  s_c7f80ca9cbc992::t_55b2a04189575a 10-11
+README.md
+  s_c7f80ca9cbc992::t_823e25f1621bc0 91
+  s_c7f80ca9cbc992::t_6c2323e66ce896 90,92-95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.1",
+  "base_commit_sha": "0e8de558bea552f432e0a9be619c7aae1d42e857",
+  "prompts": {},
+  "sessions": {
+    "s_c7f80ca9cbc992": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9bc7f69f-8919-4d1b-ae92-91eb202abe05",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
