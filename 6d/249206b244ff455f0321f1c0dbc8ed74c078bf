@@ -1,0 +1,22 @@
+code-style/SKILL.md
+  s_6edff33bd46212::t_27f47c6b5969f6 13-14
+  s_6edff33bd46212::t_f208ce64cc59c4 62
+code-style/references/conventions-checklist.md
+  s_6edff33bd46212::t_294ed124b203ce 38-40,43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "6d249206b244ff455f0321f1c0dbc8ed74c078bf",
+  "prompts": {},
+  "sessions": {
+    "s_6edff33bd46212": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "499ff56e-aac9-43f6-b9ad-130eb3b1c399",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
