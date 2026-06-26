@@ -1,0 +1,21 @@
+handsfree/SKILL.md
+  s_bb191df2072dd9::t_3deaf7c011631a 55-61,70-72,112-117
+handsfree/appendix-stop.sh
+  s_bb191df2072dd9::t_07ce4648b3ecf3 6,8-10,18,31-34,62-65,86-110,123-124,129,134,136-150,155-193,198,200-203,206,216-221,229-232,241,295,358
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "e851da3fb8edbf88e179ef8ad43da8ac49a6970a",
+  "prompts": {},
+  "sessions": {
+    "s_bb191df2072dd9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a1ae03c-7d5e-4bf3-9282-50d09c873f0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
