@@ -87,3 +87,9 @@ Or via [skills.sh](https://skills.sh).
   ```
   npx skills@latest add Vesely/skills/ai-gateway
   ```
+
+- **wispr** — Control the [Wispr Flow](https://wisprflow.ai/) voice dictation app on macOS from the shell via its `wispr-flow://` URL scheme. Lets an AI agent (Claude Code, etc.) turn Wispr Flow listening on/off for the user: start/stop hands-free dictation and switch the microphone with a single `open` call — no keystroke simulation, no API key.
+
+  ```
+  npx skills@latest add Vesely/skills/wispr
+  ```
