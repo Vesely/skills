@@ -1,0 +1,38 @@
+say/gemini-say.ts
+  s_bb191df2072dd9::t_a128547a08a0be 4-6
+  s_bb191df2072dd9::t_047b4c588100ad 12
+  s_6b09944161f73a::t_aa9775e1dd1451 1-3,7-11,13-110
+README.md
+  s_bb191df2072dd9::t_efd3e4b12cc86a 96-107
+say/SKILL.md
+  s_bb191df2072dd9::t_dfd998f004ad2c 46
+  s_6b09944161f73a::t_0f3641e99aedd9 1-45,47-58
+handsfree/SKILL.md
+  s_bb191df2072dd9::t_0d7df5484d710f 1-66
+handsfree/say-listen.sh
+  s_bb191df2072dd9::t_eb236faacb417a 1-51
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "96afd13f6a502cd3b9785a6b229718a002488da3",
+  "prompts": {},
+  "sessions": {
+    "s_6b09944161f73a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f231c157-4801-4321-9e31-92f4c929c3e0",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    },
+    "s_bb191df2072dd9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a1ae03c-7d5e-4bf3-9282-50d09c873f0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
