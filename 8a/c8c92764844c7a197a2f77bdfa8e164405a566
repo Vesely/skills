@@ -1,0 +1,24 @@
+say/SKILL.md
+  s_bb191df2072dd9::t_588e79a76c38d8 32
+  s_bb191df2072dd9::t_d41a3ca599b81d 38
+  s_bb191df2072dd9::t_cb79108f46512a 3
+  s_bb191df2072dd9::t_de85f5809dd34c 50
+say/gemini-say.ts
+  s_bb191df2072dd9::t_d08dda2f7884ed 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "8ac8c92764844c7a197a2f77bdfa8e164405a566",
+  "prompts": {},
+  "sessions": {
+    "s_bb191df2072dd9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a1ae03c-7d5e-4bf3-9282-50d09c873f0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
