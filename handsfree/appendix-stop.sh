@@ -69,6 +69,9 @@ mkdir -p "$RUN_DIR"
 
 log_line() { print -r -- "$@"; }
 
+# Lines in the events log (0 if absent); selftest uses it to detect a fire.
+event_count() { wc -l < "$EVENTS" 2>/dev/null | tr -d ' '; }
+
 ensure_model() {
   if [[ -f "$MODEL" ]]; then return 0; fi
   log_line "appendix-stop: model not found at $MODEL — downloading ggml-tiny.en.bin (~75 MB)…"
@@ -107,6 +110,9 @@ ensure_whisper() {
   log_line "appendix-stop: ERROR — whisper-cpp installed but whisper-stream is not on PATH." >&2
   return 1
 }
+
+# Listener preconditions (whisper binaries + model), ensured at each entry point.
+ensure_deps() { ensure_whisper && ensure_model; }
 
 # Normalize a raw transcription line to lowercase, letters/digits only.
 normalize() {
@@ -195,8 +201,7 @@ wispr_watch() {
 # Reads whisper-stream stdout through a FIFO so we keep an explicit child PID we
 # can kill on stop. No setsid / process-group trickery needed.
 run_listener() {
-  ensure_whisper || return 1
-  ensure_model || return 1
+  ensure_deps || return 1
   # Each listener instance is one-shot (it self-stops after a real fire), so clear
   # the cross-instance cooldown on start — otherwise a quick next-turn "appendix"
   # could be debounced away by the previous instance's fire timestamp.
@@ -238,8 +243,7 @@ run_listener() {
 # ---- subcommands ------------------------------------------------------------
 cmd_start() {
   if running; then log_line "appendix-stop: already running (pid $(cat "$PIDFILE"))"; return 0; fi
-  ensure_whisper || return 1
-  ensure_model || return 1
+  ensure_deps || return 1
   : > "$LOG"
   nohup /bin/zsh "$SELF" run >>"$LOG" 2>&1 &
   local pid=$!
@@ -264,7 +268,7 @@ cmd_stop() {
     pid=$(cat "$PIDFILE" 2>/dev/null)
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill -TERM "$pid" 2>/dev/null
-      local i; for i in 1 2 3 4 5 6 7 8; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+      local i; for i in {1..8}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
       kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
     fi
   fi
@@ -292,8 +296,7 @@ cmd_status() {
 
 cmd_test() {
   (( $# )) || { log_line "usage: appendix-stop.sh test FILE.wav [FILE2.wav ...]"; return 2; }
-  ensure_whisper || return 1
-  ensure_model || return 1
+  ensure_deps || return 1
   local w txt norm
   for w in "$@"; do
     if [[ ! -f "$w" ]]; then log_line "MISSING  $w"; continue; fi
@@ -319,7 +322,7 @@ cmd_selftest() {
   log_line "appendix-stop: SELF-TEST (dry-run, will not touch live Wispr)"
   cmd_start || return 1
   log_line "  warming up mic (2s)…"; sleep 2
-  before=$(wc -l < "$EVENTS" 2>/dev/null | tr -d ' ')
+  before=$(event_count)
   log_line "  speaking \"appendix\" through the speakers…"
   # Prefer the project's gemini-say helper if present; fall back to macOS say.
   if [[ -f "$HOME/.claude/skills/say/gemini-say.ts" ]] && command -v bun >/dev/null 2>&1; then
@@ -328,13 +331,13 @@ cmd_selftest() {
     say appendix
   fi
   # Give VAD + decode time to flush after the audio ends.
-  local i; for i in 1 2 3 4 5 6 7 8 9 10; do
-    after=$(wc -l < "$EVENTS" 2>/dev/null | tr -d ' ')
+  local i; for i in {1..10}; do
+    after=$(event_count)
     (( after > before )) && break
     sleep 0.5
   done
   cmd_stop >/dev/null 2>&1
-  after=$(wc -l < "$EVENTS" 2>/dev/null | tr -d ' ')
+  after=$(event_count)
   log_line "  --- whisper heard (tail of log) ---"
   grep -E '^\[' "$LOG" 2>/dev/null | tail -n 8 | sed 's/^/  /'
   if (( after > before )); then
@@ -355,7 +358,7 @@ case "${1:-}" in
   run)      run_listener ;;          # internal: foreground listener
   test)     shift; cmd_test "$@" ;;
   selftest) cmd_selftest ;;
-  install)  ensure_whisper && ensure_model ;;
+  install)  ensure_deps ;;
   *) cat >&2 <<EOF
 appendix-stop.sh — voice "appendix" -> stop Wispr hands-free dictation
   start | stop | restart | status | install
