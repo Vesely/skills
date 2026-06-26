@@ -100,7 +100,7 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/say
   ```
 
-- **handsfree** — Run a whole Claude Code session by voice (e.g. while driving). One wrapper combines `say` (Gemini TTS out) and `wispr` (dictation in) with a cmux focus-pull: every reply is spoken aloud and the mic is auto-armed so you can answer without touching the keyboard. Requires cmux, Wispr Flow, and the `say` skill.
+- **handsfree** — Run a whole Claude Code session by voice (e.g. while driving). One wrapper combines `say` (Gemini TTS out) and `wispr` (dictation in) with a cmux focus-pull, plus an **appendix-stop** mic listener (whisper.cpp): every reply is spoken aloud and the mic is auto-armed, and saying the word **"appendix"** ends and submits your turn — so you answer and send without ever touching the keyboard. Requires cmux, Wispr Flow, the `say` skill, and `whisper-cpp` for the voice stop.
 
   ```
   npx skills@latest add Vesely/skills/handsfree

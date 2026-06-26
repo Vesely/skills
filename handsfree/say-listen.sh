@@ -48,4 +48,10 @@ osascript -e 'tell application id "com.cmuxterm.app" to activate' 2>/dev/null ||
 # Brief settle so the activation lands before the turn returns.
 sleep 0.15
 
+# Ensure the appendix-stop listener is running so the user can END and SUBMIT the
+# turn by voice (say "appendix"). Idempotent; needs whisper.cpp. See appendix-stop.sh.
+# Opt out with HANDSFREE_NO_APPENDIX=1.
+[[ "${HANDSFREE_NO_APPENDIX:-0}" == "1" ]] || \
+  "${0:A:h}/appendix-stop.sh" start >/dev/null 2>&1 || true
+
 echo "FOCUS win=$WIN_ID ws=$WS_REF pane=$PANE_REF | WISPR ARMED"
