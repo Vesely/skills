@@ -52,6 +52,13 @@ Two details were essential (both live-tested) and are baked into the script:
   (`APPENDIX_ENTER_DELAY`, default 1.3 s; toggle `APPENDIX_PRESS_ENTER`). That is
   what makes one word stop + paste + submit.
 
+**Active only while Wispr is.** The listener is one-shot: it stops itself the moment
+Wispr leaves hands-free — whether you end with "appendix", press **Escape**, or tap
+**Fn**. It watches `prefs.activeDictationSession` in Wispr's `config.json` (an object
+while dictating, `null` when stopped) and exits when it goes null; `say-listen.sh`
+re-arms both Wispr and the listener on the next turn. Disable with
+`APPENDIX_WATCH_WISPR=0`.
+
 **Trigger word leaks into the text.** Wispr also hears "appendix", so it lands in
 the dictated text. Strip it with a Wispr **Snippet**: map `appendix` → a single
 space. Add it from the Wispr UI (Settings → Dictionary / Snippets); they live in
@@ -60,8 +67,9 @@ guarded fallback (refuses while Wispr is running, backs up the DB first).
 
 First `start` auto-downloads `ggml-tiny.en.bin` (~75 MB) to `~/.cache/whisper-cpp/`.
 Tunables (env): `APPENDIX_REGEX`, `APPENDIX_COOLDOWN`, `APPENDIX_PRESS_ENTER`,
-`APPENDIX_ENTER_DELAY`, `APPENDIX_DRY_RUN`, `APPENDIX_MODEL`, and the whisper
-`APPENDIX_STEP_MS` / `APPENDIX_VAD_THOLD` / `APPENDIX_LENGTH_MS` / `APPENDIX_THREADS`.
+`APPENDIX_ENTER_DELAY`, `APPENDIX_WATCH_WISPR`, `APPENDIX_DRY_RUN`, `APPENDIX_MODEL`,
+and the whisper `APPENDIX_STEP_MS` / `APPENDIX_VAD_THOLD` / `APPENDIX_LENGTH_MS` /
+`APPENDIX_THREADS`.
 
 ## When ACTIVE (the loop)
 
@@ -101,7 +109,9 @@ Spoken-reply rules (same as the `say` skill):
 - **Don't say "appendix" in a spoken reply** — the listener would fire on your own
   TTS. Refer to it as "the trigger word" when speaking.
 - **Requirements:** Wispr Flow running (Microphone permission), `say` skill +
-  Vertex creds, cmux CLI, `bun`, `python3`; `whisper-cpp` (`brew install
-  whisper-cpp`) and Accessibility/Automation permission for the terminal (so the
-  auto-Return works) for the appendix-stop feature. Optional: `nowplaying-cli` for
-  background-audio ducking. Verified against Wispr Flow 1.5.980.
+  Vertex creds, cmux CLI, `bun`, `python3`; `whisper-cpp` and
+  Accessibility/Automation permission for the terminal (so the auto-Return works)
+  for the appendix-stop feature. `whisper-cpp` is **auto-installed** via Homebrew
+  on first use (`ensure_whisper`); if Homebrew is absent it logs `brew install
+  whisper-cpp` and bails. Optional: `nowplaying-cli` for background-audio ducking.
+  Verified against Wispr Flow 1.5.980.
