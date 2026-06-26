@@ -93,3 +93,15 @@ Or via [skills.sh](https://skills.sh).
   ```
   npx skills@latest add Vesely/skills/wispr
   ```
+
+- **say** — Summarize the previous assistant message into a short spoken recap and play it aloud via Gemini TTS (Vertex AI, Czech voice Charon), automatically ducking background audio (Spotify / Music / browser). Falls back to macOS `say`. Provide Vertex service-account creds via the `GEMINI_SAY_ENV` file.
+
+  ```
+  npx skills@latest add Vesely/skills/say
+  ```
+
+- **handsfree** — Run a whole Claude Code session by voice (e.g. while driving). One wrapper combines `say` (Gemini TTS out) and `wispr` (dictation in) with a cmux focus-pull: every reply is spoken aloud and the mic is auto-armed so you can answer without touching the keyboard. Requires cmux, Wispr Flow, and the `say` skill.
+
+  ```
+  npx skills@latest add Vesely/skills/handsfree
+  ```
