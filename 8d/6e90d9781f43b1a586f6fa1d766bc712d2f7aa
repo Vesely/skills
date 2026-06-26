@@ -1,0 +1,27 @@
+README.md
+  s_bb191df2072dd9::t_c42d6a668df06f 103
+handsfree/SKILL.md
+  s_bb191df2072dd9::t_47351831212eac 3,10-12,22-64,85-86,88-89,99-100,102-105
+handsfree/add-wispr-snippet.sh
+  s_bb191df2072dd9::t_2e8efe95f0405c 1-57
+handsfree/appendix-stop.sh
+  s_bb191df2072dd9::t_c94a5d05a540fe 1-275
+handsfree/say-listen.sh
+  s_bb191df2072dd9::t_d29e26c23161e3 51-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "8d6e90d9781f43b1a586f6fa1d766bc712d2f7aa",
+  "prompts": {},
+  "sessions": {
+    "s_bb191df2072dd9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a1ae03c-7d5e-4bf3-9282-50d09c873f0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
