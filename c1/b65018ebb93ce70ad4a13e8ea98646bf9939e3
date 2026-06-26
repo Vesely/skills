@@ -1,0 +1,19 @@
+handsfree/appendix-stop.sh
+  s_bb191df2072dd9::t_95cab5a81efc50 72-74,114-116,204,246,271,299,325,334-335,340,361
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "c1b65018ebb93ce70ad4a13e8ea98646bf9939e3",
+  "prompts": {},
+  "sessions": {
+    "s_bb191df2072dd9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a1ae03c-7d5e-4bf3-9282-50d09c873f0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
