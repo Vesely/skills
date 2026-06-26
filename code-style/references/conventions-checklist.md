@@ -35,10 +35,12 @@ If a formatter config exists, these are settled — run it instead of hand-editi
 - Optional vs `| undefined`; nullability conventions
 
 ## Comments & docs
-- Density: heavily commented vs near-none — match it; don't add narration to a terse codebase
+- Density: heavily commented vs near-none — match it; don't add narration to a terse codebase. AI-written code skews over-commented, so the default lean is *fewer* comments — but only because most repos are sparser than AI output; always evidence the target density from neighbors, and if the project is intentionally comment-heavy, match that.
+- What to trim in the new/changed lines: comments that restate the code (`// increment count` above `count++`), narrate obvious steps, or docstring a self-explanatory symbol — the "AI slop" that makes new lines stand out.
+- What to keep, always: comments carrying intent the code can't show — a *why*, a warning, a non-obvious caveat, a TODO/FIXME, a legal/license header, or a lint/type pragma (`eslint-disable`, `# type: ignore`, `# noqa`) — even in code you just wrote.
 - Doc style: JSDoc/TSDoc/docstrings — format, and which symbols get them
 - Inline comment voice (terse vs full sentences), TODO/FIXME format
-- **Preserve existing comments** when editing; don't strip them as part of a "style" pass
+- **Preserve pre-existing comments**: comments that predate your change are out of scope — don't strip them as part of a "style" pass (that's not surgical). Trimming redundant comments inside the lines the diff adds or changes, to match density, is in scope and expected — that's aligning the new code, not editing old code.
 
 ## Functions & control flow idioms
 - Declaration style: `function` vs arrow; arrow-param parens (`x =>` vs `(x) =>`)

@@ -10,7 +10,8 @@ description: >-
   project, or invokes /code-style. Works in any language or framework — it
   discovers the rules from the repo rather than assuming them. Reach for this
   even when the user doesn't say the word "style" but clearly wants new code to
-  blend in with existing code.
+  blend in with existing code — including trimming AI-generated over-commenting
+  down to the codebase's own comment density.
 ---
 
 # Code Style
@@ -58,7 +59,7 @@ If a tool isn't installed and can't be run quickly (no network/install available
 
 ### 3. Learn the conventions tooling can't enforce
 
-Formatters don't cover the conventions that most make code "look native": naming, structure, idioms, comments. Learn these from evidence, not assumption. For each changed file, read **2–4 neighbor files of the same kind** (same directory, same extension, similar role — e.g. a sibling component, another route handler, another test) and skim any style docs the helper found (`CLAUDE.md`, `CONTRIBUTING`, `.editorconfig`).
+Formatters don't cover the conventions that most make code "look native": naming, structure, idioms, comments. Learn these from evidence, not assumption. For each changed file, read **2–4 neighbor files of the same kind** (same directory, same extension, similar role — e.g. a sibling component, another route handler, another test) and skim any style docs the helper found (`CLAUDE.md`, `CONTRIBUTING`, `.editorconfig`). Comments are where AI-written code most often gives itself away — it over-narrates, restating what the code plainly does — so by default trim that redundancy on your changed lines down to the neighbors' density (e.g. drop `// loop over users` above `for (const user of users)`), keeping any comment that carries intent the code can't show (a *why*, a warning, a TODO/FIXME, a legal header, a lint/type pragma). This is a default lean, not a blanket rule — it applies because AI output skews verbose, so evidence the target density from the neighbors, and if the project is genuinely comment-heavy, match that instead.
 
 `references/conventions-checklist.md` is the catalog of dimensions to inspect — read it so you know what to look for (naming, imports, exports, error handling, comments, types, test shape, framework idioms). Pull the conventions from the neighbors; use the checklist as the lens.
 
