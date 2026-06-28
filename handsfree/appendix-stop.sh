@@ -80,7 +80,17 @@ CAPTURE="${APPENDIX_CAPTURE-0}"
 #            -23 dB), so the listener hears nothing.
 #   auto   : ffmpeg if the ffmpeg binary is present, else sdl. (default)
 ENGINE="${APPENDIX_ENGINE:-auto}"
-SEG_SEC="${APPENDIX_SEG_SEC:-2}"           # ffmpeg engine: rolling segment length (s)
+SEG_SEC="${APPENDIX_SEG_SEC:-1}"           # ffmpeg engine: rolling segment length (s)
+# whisper initial-prompt hotword bias: nudges decoding toward the trigger word so a
+# noisy/quiet utterance still resolves to it. Empty = off. Verified not to turn
+# normal speech into the trigger (no false fires).
+PROMPT_BIAS="${APPENDIX_PROMPT:-appendix}"
+# Keep the model WARM via a persistent whisper-server (loaded once, reused across
+# listener restarts) instead of a fresh whisper-cli per segment — the per-call model
+# load was the dominant latency. 1 = on (default); falls back to whisper-cli if the
+# server can't start, so there is no regression. Server is killed on `stop`.
+USE_SERVER="${APPENDIX_SERVER:-1}"
+SERVER_PORT="${APPENDIX_SERVER_PORT:-8771}"
 
 RUN_DIR="${APPENDIX_RUN_DIR:-$HOME/.cache/wispr-appendix-stop}"
 PIDFILE="$RUN_DIR/listener.pid"
@@ -89,6 +99,7 @@ EVENTS="$RUN_DIR/events.log"
 COOLDOWN_FILE="$RUN_DIR/last-fire.epoch"
 FIFO="$RUN_DIR/stream.fifo"
 WSPIDFILE="$RUN_DIR/whisper.pid"
+SRVPIDFILE="$RUN_DIR/whisper-server.pid"   # persistent whisper-server (warm model)
 # Wispr's live config: prefs.activeDictationSession is an object while hands-free
 # is dictating and null when it stops (Escape / Fn / appendix / off) — verified.
 # Polled to keep the listener alive only while Wispr is.
@@ -206,14 +217,24 @@ fire() {  # arg: raw heard text. Debounced. Returns 0 ONLY on a real fire (so th
   # the dictated text an UNPREDICTABLE moment after stop-hands-free (engine + Wispr
   # finalize latency), so a single timed Return races the paste and often hits a
   # still-empty prompt. Press it repeatedly across a ~4 s window instead: the press
-  # after the (atomic) paste submits; presses on the empty prompt are no-op. Toggle
-  # off with APPENDIX_PRESS_ENTER=0; tune cadence with APPENDIX_ENTER_EVERY /
-  # APPENDIX_ENTER_TRIES. `&!` disowns it so it outlives the listener self-stopping.
+  # after the (atomic) paste submits; presses on the empty prompt are no-op.
+  #
+  # Submit via `cmux send-key` to the CALLER's workspace (written by say-listen to
+  # caller.target): that injects Enter into the exact prompt regardless of which app
+  # is OS-frontmost — far more reliable than osascript, which fails if Wispr's paste
+  # momentarily steals focus. osascript is the fallback. Toggle off with
+  # APPENDIX_PRESS_ENTER=0; tune cadence with APPENDIX_ENTER_EVERY / APPENDIX_ENTER_TRIES.
   if [[ "${APPENDIX_PRESS_ENTER:-1}" == "1" ]]; then
-    ( typeset n=0
+    ( typeset n=0 tgt
+      tgt=$(cat "$RUN_DIR/caller.target" 2>/dev/null || true)
       while (( ++n <= ${APPENDIX_ENTER_TRIES:-6} )); do
         sleep "${APPENDIX_ENTER_EVERY:-0.7}"
-        osascript -e 'tell application "System Events" to key code 36' >/dev/null 2>&1 || true
+        if [[ -n "$tgt" ]] && command -v cmux >/dev/null 2>&1 \
+             && cmux send-key --workspace "$tgt" enter >/dev/null 2>&1; then
+          :
+        else
+          osascript -e 'tell application "System Events" to key code 36' >/dev/null 2>&1 || true
+        fi
       done ) &!
   fi
   return 0
@@ -260,23 +281,80 @@ wispr_watch() {
   done
 }
 
+# ---- whisper backends -------------------------------------------------------
+# A persistent whisper-server keeps the model loaded (warm), so each segment is a
+# fast HTTP inference instead of a fresh whisper-cli that reloads the ~480 MB model
+# every call — the per-call load was the dominant trigger latency.
+_server_alive() {
+  [[ -f "$SRVPIDFILE" ]] || return 1
+  local p; p=$(cat "$SRVPIDFILE" 2>/dev/null)
+  [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null
+}
+
+# Ensure a warm whisper-server is up (reuse an existing one). Exit 0 if usable. The
+# server applies LANG / -sns / prompt-bias to every request, so callers just POST audio.
+_ensure_server() {
+  [[ "$USE_SERVER" == "1" ]] || return 1
+  command -v whisper-server >/dev/null 2>&1 && command -v curl >/dev/null 2>&1 || return 1
+  _server_alive && return 0
+  local -a pf=()
+  [[ -n "$PROMPT_BIAS" ]] && pf=(--prompt "$PROMPT_BIAS" --carry-initial-prompt)
+  whisper-server -m "$MODEL" -l "$LANG" -sns "${pf[@]}" -t "$THREADS" \
+    --host 127.0.0.1 --port "$SERVER_PORT" >>"$LOG" 2>&1 &
+  local sp=$!
+  disown 2>/dev/null || true          # outlive the one-shot listener; killed only on `stop`
+  print -r -- "$sp" > "$SRVPIDFILE"
+  local ping="$RUN_DIR/_ping.wav" r
+  ffmpeg -y -hide_banner -loglevel error -f lavfi -i "anullsrc=r=16000:cl=mono" -t 0.3 "$ping" 2>/dev/null
+  for r in {1..40}; do                 # up to ~20 s for the model to load + listen
+    kill -0 "$sp" 2>/dev/null || break
+    if curl -s -m 2 -F file=@"$ping" -F response_format=text \
+         "http://127.0.0.1:$SERVER_PORT/inference" >/dev/null 2>&1; then
+      rm -f "$ping"; return 0
+    fi
+    sleep 0.5
+  done
+  rm -f "$ping"; kill "$sp" 2>/dev/null; rm -f "$SRVPIDFILE"
+  return 1
+}
+
+# Transcribe one WAV -> trimmed text. Warm server when WS_USE_SERVER=1, else whisper-cli.
+appendix_transcribe() {
+  if [[ "${WS_USE_SERVER:-0}" == "1" ]]; then
+    curl -s -m 6 -F file=@"$1" -F response_format=text \
+      "http://127.0.0.1:${SERVER_PORT}/inference" 2>/dev/null | tr -d '\n' | sed 's/^ *//;s/ *$//'
+  else
+    local -a pf=()
+    [[ -n "$PROMPT_BIAS" ]] && pf=(--prompt "$PROMPT_BIAS" --carry-initial-prompt)
+    whisper-cli -m "$MODEL" -f "$1" -l "$LANG" -nt -np -sns "${pf[@]}" -t "$THREADS" 2>/dev/null \
+      | tr -d '\n' | sed 's/^ *//;s/ *$//'
+  fi
+}
+
 # ---- core listener ----------------------------------------------------------
 # ffmpeg engine: continuous avfoundation capture -> rolling WAV segments, each
-# transcribed offline by whisper-cli and matched. Used when SDL capture is dead
-# (whisper-stream opens the mic but delivers silence on some macOS builds).
+# transcribed (warm whisper-server, else whisper-cli) and matched. Used because
+# whisper-stream's SDL capture delivers silence on some macOS builds.
 run_listener_ffmpeg() {
   local idx; idx="$(_ffmpeg_audio_index)"; [[ -n "$idx" ]] || idx=0
   local segdir="$RUN_DIR/seg"
   rm -rf "$segdir"; mkdir -p "$segdir"
   local ff_pid=""
+  # NB: cleanup does NOT kill whisper-server — it persists across one-shot listener
+  # restarts so the model stays warm. `stop` (and /handsfree off) kills it.
   cleanup() { [[ -n "$ff_pid" ]] && kill "$ff_pid" 2>/dev/null; rm -rf "$segdir"; rm -f "$WSPIDFILE" "$PIDFILE"; exit 0; }
   trap cleanup TERM INT HUP
 
-  log_line "appendix-stop: listening (ffmpeg engine) | avfoundation audio idx=$idx model=${MODEL:t} seg=${SEG_SEC}s cooldown=${COOLDOWN}s dry_run=${DRY_RUN}"
+  # Warm the model server if possible; size segments to match the chosen backend.
+  if _ensure_server; then WS_USE_SERVER=1; else WS_USE_SERVER=0; fi
+  local eff_seg="$SEG_SEC"
+  [[ "$WS_USE_SERVER" == "1" ]] || eff_seg=2   # whisper-cli reload is slow -> longer segments
 
-  # -reset_timestamps so every segment is a standalone playable/decodable WAV.
+  log_line "appendix-stop: listening (ffmpeg + $([[ "$WS_USE_SERVER" == "1" ]] && print whisper-server || print whisper-cli)) | idx=$idx model=${MODEL:t} seg=${eff_seg}s cooldown=${COOLDOWN}s dry_run=${DRY_RUN}"
+
+  # -reset_timestamps so every segment is a standalone decodable WAV.
   ffmpeg -hide_banner -loglevel error -nostdin -f avfoundation -i ":$idx" \
-      -ar 16000 -ac 1 -f segment -segment_time "$SEG_SEC" -reset_timestamps 1 \
+      -ar 16000 -ac 1 -f segment -segment_time "$eff_seg" -reset_timestamps 1 \
       "$segdir/seg_%05d.wav" 2>>"$LOG" &
   ff_pid=$!
   print -r -- "$ff_pid" > "$WSPIDFILE"
@@ -286,9 +364,8 @@ run_listener_ffmpeg() {
   fi
 
   # Transcribe each CLOSED segment together with the PREVIOUS one (an overlapping
-  # window), so the trigger word is caught even when it straddles a segment
-  # boundary — the main reason a first "appendix" was sometimes missed. The 6 s
-  # cooldown dedupes the word reappearing across two consecutive windows.
+  # window) so the trigger word is caught even when it straddles a segment boundary.
+  # The 6 s cooldown dedupes the word reappearing across two consecutive windows.
   local cur prev="" txt norm i
   local winlist="$segdir/_win.txt" win="$segdir/_win.wav"
   while kill -0 "$ff_pid" 2>/dev/null; do
@@ -303,15 +380,13 @@ run_listener_ffmpeg() {
       if [[ -n "$prev" && -f "$prev" ]]; then
         printf "file '%s'\nfile '%s'\n" "$prev" "$cur" > "$winlist"
         if ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i "$winlist" -c copy "$win" 2>/dev/null; then
-          txt=$(whisper-cli -m "$MODEL" -f "$win" -l "$LANG" -nt -np -sns -t "$THREADS" 2>/dev/null \
-                  | tr -d '\n' | sed 's/^ *//;s/ *$//')
+          txt=$(appendix_transcribe "$win")
         else
           txt=""
         fi
         rm -f "$prev" "$win" "$winlist"
       else
-        txt=$(whisper-cli -m "$MODEL" -f "$cur" -l "$LANG" -nt -np -sns -t "$THREADS" 2>/dev/null \
-                | tr -d '\n' | sed 's/^ *//;s/ *$//')
+        txt=$(appendix_transcribe "$cur")
       fi
       prev="$cur"          # keep cur for the next window's overlap
       norm=$(print -r -- "$txt" | normalize)
@@ -414,11 +489,17 @@ cmd_stop() {
       kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
     fi
   fi
-  # belt-and-suspenders: only the whisper-stream WE started
+  # belt-and-suspenders: only the capture child WE started
   if [[ -f "$WSPIDFILE" ]]; then
     local wp; wp=$(cat "$WSPIDFILE" 2>/dev/null)
     [[ -n "$wp" ]] && kill -TERM "$wp" 2>/dev/null
     rm -f "$WSPIDFILE"
+  fi
+  # the persistent whisper-server outlives one-shot listeners; stop kills it for real
+  if [[ -f "$SRVPIDFILE" ]]; then
+    local sp; sp=$(cat "$SRVPIDFILE" 2>/dev/null)
+    [[ -n "$sp" ]] && kill -TERM "$sp" 2>/dev/null
+    rm -f "$SRVPIDFILE"
   fi
   rm -f "$PIDFILE" "$FIFO"
   log_line "appendix-stop: stopped."

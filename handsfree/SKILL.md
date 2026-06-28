@@ -57,18 +57,27 @@ choices are baked in, each fixing a real failure:
 - **Multilingual `small` model + `-l cs`.** A Czech speaker saying the English word
   "appendix" transcribes as garbage under the English `tiny.en` ("upend it", "(upbeat
   music)"). The multilingual **`small`** model (~480 MB, auto-downloaded) with Czech
-  reads it cleanly as "Appendix" at ~1.1 s per window. `-sns` (suppress non-speech
-  tokens) stops "(zvuk)"/"(hudba)" hallucinations from road noise.
-- **Pronunciation-tolerant match.** `APPENDIX_REGEX` matches "appendix" plus the
-  common mis-hears (`a pendix`, `habendix`, `pandix`, `opendiks`, `a bendej`…) without
-  firing on normal Czech speech. Overlapping windows catch the word even when it
-  straddles a 2 s segment boundary.
-- **Repeated Return, not one.** Wispr pastes the dictated text an unpredictable moment
-  after `stop-hands-free`, so a single timed Return races the paste and hits an empty
-  prompt. The listener presses Return several times across a ~4 s window (tune with
-  `APPENDIX_ENTER_TRIES` / `APPENDIX_ENTER_EVERY`); the press after the paste submits,
-  the rest are no-ops. `open -g` for the stop deeplink keeps focus on the prompt
-  (foregrounding Wispr makes its paste path drop the text).
+  reads it cleanly as "Appendix". `-sns` (suppress non-speech tokens) stops
+  "(zvuk)"/"(hudba)" hallucinations from road noise, and `--prompt` primes decoding with
+  the trigger word (`APPENDIX_PROMPT`) so a quiet/noisy utterance still locks onto it
+  (verified not to turn normal speech into a false fire).
+- **Warm model server.** Reloading the ~480 MB model per segment was the dominant
+  latency. A **persistent `whisper-server`** loads it once and answers each segment over
+  HTTP (~0.5 s), so word→stop drops to ~1 s and segments shrink to 1 s. It survives the
+  one-shot listener restarts and is killed only by `stop`. `APPENDIX_SERVER=0` forces the
+  per-call `whisper-cli` fallback (no regression if the server can't start).
+- **Pronunciation-tolerant match.** `APPENDIX_REGEX` matches "appendix" plus the common
+  mis-hears (`a pendix`, `habendix`, `pandix`, `opendiks`, `a bendej`…) without firing on
+  normal Czech speech. Overlapping windows catch the word even when it straddles a
+  segment boundary.
+- **Repeated Return via cmux, not a global keystroke.** Wispr pastes the dictated text
+  an unpredictable moment after `stop-hands-free`, so a single timed Return races the
+  paste and hits an empty prompt. The listener presses Return several times across a
+  ~4 s window (`APPENDIX_ENTER_TRIES` / `APPENDIX_ENTER_EVERY`); the press after the paste
+  submits, the rest are no-ops. It submits with **`cmux send-key`** into the caller's
+  workspace (written to `caller.target` by `say-listen.sh`) — focus-independent, so Wispr
+  stealing focus during the paste cannot misdirect it — with an `osascript` keystroke as
+  fallback. `open -g` for the stop deeplink keeps focus on the prompt.
 
 **Why not read Wispr's own transcript?** Tempting (Wispr's ASR is excellent), but
 Wispr writes the text — to the prompt and to its `flow.sqlite` `History` table — only
@@ -89,10 +98,11 @@ backs up the DB first).
 
 First `start` auto-downloads the model (~480 MB) to `~/.cache/whisper-cpp/`. Tunables
 (env): `APPENDIX_ENGINE` (auto/ffmpeg/sdl), `APPENDIX_MODEL`, `APPENDIX_LANG` (cs),
-`APPENDIX_REGEX`, `APPENDIX_CAPTURE` (mic index, default 0), `APPENDIX_SEG_SEC` (2),
-`APPENDIX_COOLDOWN` (6), `APPENDIX_PRESS_ENTER` (1), `APPENDIX_ENTER_TRIES` (6),
-`APPENDIX_ENTER_EVERY` (0.7), `APPENDIX_WATCH_WISPR` (0), `APPENDIX_DEBUG` (logs every
-transcription to `heard.log` for tuning), `APPENDIX_DRY_RUN`.
+`APPENDIX_REGEX`, `APPENDIX_PROMPT` (hotword bias, default `appendix`), `APPENDIX_SERVER`
+(warm whisper-server, 1) / `APPENDIX_SERVER_PORT` (8771), `APPENDIX_CAPTURE` (mic index,
+default 0), `APPENDIX_SEG_SEC` (1), `APPENDIX_COOLDOWN` (6), `APPENDIX_PRESS_ENTER` (1),
+`APPENDIX_ENTER_TRIES` (6), `APPENDIX_ENTER_EVERY` (0.7), `APPENDIX_WATCH_WISPR` (0),
+`APPENDIX_DEBUG` (logs every transcription to `heard.log` for tuning), `APPENDIX_DRY_RUN`.
 
 ### Want true "Hey Siri" robustness?
 

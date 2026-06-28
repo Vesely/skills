@@ -49,6 +49,14 @@ osascript -e 'tell application id "com.cmuxterm.app" to activate' 2>/dev/null ||
 # Brief settle so the activation lands before the turn returns.
 sleep 0.15
 
+# Tell the appendix-stop listener which cmux workspace to submit into: on a trigger
+# it presses Enter via `cmux send-key --workspace <this>` (focus-independent, far more
+# reliable than a global osascript keystroke that Wispr's paste can steal focus from).
+if [[ -n "$WS_REF" ]]; then
+  mkdir -p "$HOME/.cache/wispr-appendix-stop" 2>/dev/null || true
+  print -r -- "$WS_REF" > "$HOME/.cache/wispr-appendix-stop/caller.target" 2>/dev/null || true
+fi
+
 # Ensure the appendix-stop listener is running so the user can END and SUBMIT the
 # turn by voice (say "appendix"). Idempotent; needs whisper.cpp. See appendix-stop.sh.
 # Opt out with HANDSFREE_NO_APPENDIX=1.
