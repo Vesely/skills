@@ -1,0 +1,23 @@
+handsfree/SKILL.md
+  s_bb191df2072dd9::t_db21c0e1f0e78d 60-80,101-105
+handsfree/appendix-stop.sh
+  s_bb191df2072dd9::t_2ddfbc86e8c1d0 83-93,102,220-226,228-229,232-237,284-333,336-337,343-344,348-353,355,357,367-368,383,389,492,498-503
+handsfree/say-listen.sh
+  s_bb191df2072dd9::t_e7c9af24d2ef1a 52-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "ee65de51dafbb665e09a2ab7d0ec2286dbd401d6",
+  "prompts": {},
+  "sessions": {
+    "s_bb191df2072dd9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a1ae03c-7d5e-4bf3-9282-50d09c873f0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
