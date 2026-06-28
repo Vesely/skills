@@ -45,6 +45,7 @@ bun run ~/.claude/skills/say/gemini-say.ts "<recap, plain sentences>"
 - Write the recap as **plain sentences** — Gemini derives pauses from punctuation. Do NOT add `[short pause]` tags (that was sag-only and gets read literally).
 - The helper prints token usage + approx cost (~0.1 Kč / recap). It uses a Vertex service account (provide it via the `GEMINI_SAY_ENV` file — see `gemini-say.ts` header), region `us-central1`, model `gemini-2.5-flash-preview-tts`.
 - Plays by default; `--no-play` writes the file only, `-o <path>` sets the output path.
+- **Playback speed:** Charon reads a touch slowly, so playback is sped up ~1.07× via ffmpeg `atempo` (tempo only, pitch preserved — far cleaner than `afplay -r`). Override with `GEMINI_SAY_RATE` (`1.0` = off); needs `ffmpeg`, falls back to plain `afplay` without it.
 - **Audio ducking:** during playback the helper pauses other audio (Spotify / Music / browser / YouTube) via `nowplaying-cli` and resumes only what it paused — so the voice isn't a mishmash with background media. No-op if `nowplaying-cli` (Homebrew, optional) is absent or nothing is playing.
 
 **Fallbacks** (only if the helper errors): `sag --speed 1.1 "<recap>"` (ElevenLabs — may be quota-exhausted; add `--lang <code>` to force a language) or `say -r 188 "<recap>"` (macOS, low quality; add `-v <voice>` for a language-specific voice).

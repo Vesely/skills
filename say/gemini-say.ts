@@ -105,6 +105,19 @@ if (!noPlay) {
       ducked = true;
     }
   } catch {}
-  spawnSync("afplay", [outPath], { stdio: "ignore" });
+  // Playback speed: Charon reads a touch slowly. Speed it up with ffmpeg `atempo`,
+  // which changes TEMPO ONLY (pitch preserved) — unlike `afplay -r`, whose pitch
+  // shift makes even small bumps sound warbly/draggy. Default 1.07; override via
+  // GEMINI_SAY_RATE (1.0 = off). Falls back to plain afplay if ffmpeg is absent.
+  const RATE = process.env.GEMINI_SAY_RATE || "1.07";
+  let playPath = outPath;
+  if (RATE !== "1.0" && RATE !== "1") {
+    const spedPath = outPath.replace(/\.wav$/, ".spd.wav");
+    const ff = spawnSync("/opt/homebrew/bin/ffmpeg",
+      ["-y", "-hide_banner", "-loglevel", "error", "-i", outPath, "-filter:a", `atempo=${RATE}`, spedPath],
+      { stdio: "ignore" });
+    if (ff.status === 0) playPath = spedPath;
+  }
+  spawnSync("afplay", [playPath], { stdio: "ignore" });
   if (ducked) { try { spawnSync(NOWPLAYING, ["play"]); } catch {} }
 }
