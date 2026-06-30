@@ -44,6 +44,12 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/dynamic-agents
   ```
 
+- **handoff-to-worktree** — Package the current chat (or one or more specific issues/topics) into self-contained handoff files and launch each in a fresh `claude` with its own named git worktree — work continues without copy-pasting context. Each child claude inherits the caller session's permission mode (no hardcoded bypass). Requires cmux: default opens a new workspace per handoff; `--tabs` opens them as tabs in the current workspace.
+
+  ```
+  npx skills@latest add Vesely/skills/handoff-to-worktree
+  ```
+
 ### Code quality
 
 - **code-style** — Align newly written or changed code with the surrounding project's conventions — formatting, naming, imports, comments, idioms — learned from the codebase itself. Auto-detects your diff (uncommitted, or branch vs. the default branch), runs the project's own formatters/linters first, then fixes what tooling can't, with surgical, behavior-preserving edits. Works in any language or framework.
