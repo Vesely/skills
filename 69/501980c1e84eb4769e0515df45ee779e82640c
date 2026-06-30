@@ -1,0 +1,23 @@
+README.md
+  s_8f0f451cc5a952::t_43b34e26d64dea 48-52
+  s_8f0f451cc5a952::t_6137b617a57806 47
+handoff-to-worktree/SKILL.md
+  s_8f0f451cc5a952::t_a74c62b8c9ddd4 146
+  s_8f0f451cc5a952::t_d57e6153830f87 1-145,147-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "69501980c1e84eb4769e0515df45ee779e82640c",
+  "prompts": {},
+  "sessions": {
+    "s_8f0f451cc5a952": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e469503e-de63-4665-b0b6-790923060432",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
