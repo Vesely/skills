@@ -1,0 +1,19 @@
+README.md
+  s_4d2a8b86772059::t_801660a9a3cc8c 77-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fb5c77a0586088a71d14cb3cce011fba3d3a5f77",
+  "prompts": {},
+  "sessions": {
+    "s_4d2a8b86772059": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2c0d9660-ab5e-4480-9d47-f3ae8006e5b9",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
