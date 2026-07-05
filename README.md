@@ -74,6 +74,12 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/context-audit
   ```
 
+- **token-burn** — Analyze recent Claude Code sessions and report where the most tokens (and estimated cost) were burned, with data-driven tips to cut usage and avoid rate limits. Ranks the heaviest sessions and projects (worktrees grouped), breaks down cache efficiency, and renders a minimalist report in a cmux markdown panel — or a plain-text terminal fallback. Triggers on `/token-burn`, `/burn`, "where did my tokens go", "why am I hitting rate limits".
+
+  ```
+  npx skills@latest add Vesely/skills/token-burn
+  ```
+
 ### Utilities
 
 - **catbox** — Upload files to catbox.moe for free, anonymous hosting with direct links. No account needed.
