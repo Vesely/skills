@@ -1,104 +1,92 @@
 ---
 name: root-cause
-description: Use before shipping any fix, and the moment you catch yourself explaining why a problem cannot properly be fixed. Forces you to state the defect mechanism, classify what you are actually shipping (fix / mitigation / workaround), and refuse to let cost, risk or scope constraints quietly redefine the problem. Trigger on "root cause", "is this the real fix", "did you actually fix it", "quick fix", "patch", "workaround", "band-aid", "good enough for now" — or whenever a fix's reliability rests on an instruction being followed rather than on a guarantee.
+description: Use when a defect's mechanism is known and the change you are about to ship may leave it intact — prompt/instruction tweaks, retries, warnings, post-hoc repair, fallbacks, guards downstream of the bad value — or when cost, risk, validation difficulty or scope is steering you toward a substitute. Fires on YOUR OWN reasoning, not just the user's words: "too risky to change", "hard to validate", "we detect and correct it downstream", "the prompt now instructs it to", "out of scope for this fix", "we don't have that information", "that's decided by the model". ALWAYS load before writing "fixed" or "root cause" in any summary, commit or PR. Not for initial diagnosis (use systematic-debugging), nor for routine fixes that plainly remove the mechanism.
 ---
 
 # Root Cause
 
-`systematic-debugging` gets you **to** the root cause. This skill stops you from **walking away from it** once you are standing on it.
-
-The failure it prevents is not "I never investigated." It is the subtler one:
-
-> I found the real cause, judged it too expensive / risky / out of scope, built something around it, and then described that as the fix.
+`systematic-debugging` gets you **to** the root cause. This stops you **walking away from it** once you are standing on it.
 
 ## The Iron Rule
 
-**You may ship a mitigation. You may not ship a mitigation _called_ a fix.**
+**A mitigation is allowed. A mitigation that hides the fix you already found is not.**
 
-## The gate: three questions before any fix lands
+Shipping anything less than a fix obliges you, **in the user-facing report**, to:
 
-### 1. State the mechanism
+1. **name** the true fix,
+2. **state what it costs** (money, migration, schema change, a live run, scope, risk),
+3. **ask** whether to do it — and **wait for the answer**.
 
-Finish this sentence with no hedging:
+> A correctly labelled mitigation that stays silent about the fix you found is the same walk-away with better paperwork.
 
-> "The defect happens because ______."
+Once a human has knowingly chosen the mitigation, **ship it and stop re-litigating**. The goal is an informed decision, not the expensive fix.
 
-If your sentence contains *sometimes*, *may*, *tends to*, *the model might*, *the user could* — you have a **symptom**, not a mechanism. Keep going.
+*(Precedence: if another rule tells you "symptom fixes are always failure" — a labelled mitigation shipped with the true fix offered is not failure. An unlabelled one is.)*
 
-### 2. Name what you are shipping
+## The gate
 
-|  | Definition | Allowed? |
+### 1. State the causal chain, with evidence
+
+> When **[condition]**, **[component]** loses / misinterprets **[specific signal]**, producing **[wrong output]**.
+> Evidence: **[observation]**.
+
+If your sentence bottoms out in a wrong **judgment** by a model, a user, or an upstream system, **you are not done** — the real mechanism is that the deciding signal is not data. Go to Tell #1.
+
+Do not redefine the mechanism to fit the patch you already have in mind.
+
+### 2. Classify — in the report, not in your head
+
+| | The mechanism… | |
 |---|---|---|
-| **Fix** | The mechanism can no longer occur. | yes |
-| **Mitigation** | Mechanism intact. You made it rarer, or you detect and repair it afterwards. | yes, **if named** |
-| **Workaround** | Mechanism intact. A human absorbs the cost. | yes, **if named** |
+| **Fix** | can no longer occur, on the stated inputs and paths | ship it |
+| **Mitigation** | is intact; you made it rarer, or you repair it afterwards | Iron Rule applies |
+| **Workaround** | is intact; a human absorbs the cost | Iron Rule applies |
 
-Write the label down. Ambiguity here is how mitigations get promoted to "fixed" by accident.
+The label goes in the summary / commit / PR. A label that exists only in your reasoning is not a label.
 
-### 3. Apply the compliance test
+### 3. Enforcement test — for anything you want to call a fix
 
-Does correctness depend on someone **choosing to comply** — an LLM following an instruction, a human remembering a convention, a caller honoring a comment?
+A guarantee is not a vibe. Adding a field or a code path proves nothing on its own. Show all four:
 
-**Then it is a mitigation.** Guarantees come from code, types, schemas and data. Never from prose.
+1. the signal is **captured** from the authoritative source;
+2. it **survives** every transformation between there and the decision;
+3. the outcome is **derived or validated by machine-enforced logic**;
+4. a missing or invalid signal **cannot silently fall back** to the old judgment.
+
+If any step still rests on an LLM complying, a human remembering, or unenforced prose — it is a mitigation. Say **which step**.
 
 ## Tell #1: the word "can't" marks the spot
 
-The moment you write or think any of these:
+The moment you think:
 
-- "we don't have that information"
-- "that's decided by the model / the user / upstream"
-- "there is no deterministic way to know"
-- "it isn't captured anywhere"
+> "we don't have that information" · "that's decided by the model / the user / upstream" · "it isn't captured anywhere"
 
-**That sentence _is_ the root cause.** It is not an obstacle standing in front of the root cause.
+**That sentence _is_ the root cause.** It is not an obstacle standing in front of it.
 
-So do not build a clever structure around the absence. **Go get the missing thing.** Nearly always this means turning a *judgment* into *data*: capture the signal, add the field, record the input, make the implicit explicit — and then decide in code, where it is deterministic and testable.
+Turn the **judgment into data**: capture the signal at its source, then decide in code. Go get the missing thing — or ask for what getting it requires (Tell #2).
 
-Ask: **what would make this deterministic?**
+**Boundary case:** if the signal genuinely does not exist at any source you control or can request, that is a real system boundary, not a defect. Then a named mitigation *is* the right answer. Say so explicitly.
 
 ## Tell #2: constraint laundering
 
-Watch for a constraint about **how you work** quietly becoming a decision about **what you build**:
+Watch a constraint about **how you work** turn into a decision about **what you build**:
 
 | What you told yourself | What actually happened |
 |---|---|
-| "I can only verify X cheaply, so I'll build X" | Your validation budget picked the architecture |
-| "Surgical edits only, don't touch the schema" | Blast-radius discipline became avoidance of the correct file |
-| "That edge case makes this approach messy" | One case you would have had to model vetoed the whole design |
-| "The proper fix is expensive / needs approval" | You designed around the ask instead of making it |
+| "I can only verify X cheaply, so I'll build X" | your validation budget picked the architecture |
+| "surgical edits only, don't touch the schema" | blast-radius discipline became avoidance of the correct file |
+| "too risky / too expensive / out of scope" | you made the human's call for them |
 
-**Rule:** when the correct fix needs a resource — money, a live run, an approval, a schema change, more scope — **ask for it**. Surface the tradeoff and let the human decide. Never quietly ship a worse thing that happens to fit your budget.
-
-## Layering is good. Mislabeling is not.
-
-Defence in depth is correct engineering: a root-cause fix **plus** a net beneath it for what the fix cannot cover. What is not allowed is shipping **only the net** and reporting it as the cure.
+When the correct fix needs a resource — money, a live run, an approval, a migration, a schema change, scope, **or accepting risk** — **ask, and wait.** Risk acceptance is the human's call, not yours. Do not ask and ship the substitute in the same breath.
 
 ## Report honestly
 
-Your summary may not claim more than the mechanism guarantees.
+Claim only what the mechanism guarantees. A prompt cannot make anything *"authoritative"* — only code can. Separate what is **guaranteed** from what is merely **more likely**, and state what remains uncovered.
 
-If the direction is still chosen by an LLM, you may not write *"now authoritative"* — a prompt cannot make anything authoritative, only code can. Separate what is **guaranteed** from what is merely **more likely**, and say plainly what remains uncovered.
+## Before you write "fixed" or "root cause"
 
-## Red flags
-
-Each of these describes a mitigation. All are fine to ship. None may be called a fix.
-
-- "the prompt now tells it to…"
-- "we detect it and repair it afterwards"
-- "we warn the user"
-- "the user can correct it manually"
-- "this should make it much less likely"
-- "added a retry / a guard clause / a null check"
-
-## Done means
-
-- [ ] Mechanism stated in one unhedged sentence
-- [ ] What you are shipping is labelled: fix / mitigation / workaround
-- [ ] If a "can't" appeared, you tried to obtain the missing thing — or explicitly asked to
-- [ ] Constraints were surfaced, not laundered into the design
-- [ ] Verified against the **original** failing input, not a synthetic stand-in
+- [ ] Causal chain stated with evidence, and it does **not** bottom out in "the model/user judged wrong"
+- [ ] The label (fix / mitigation / workaround) appears **in the report**
+- [ ] Anything called a fix passes all four steps of the enforcement test
+- [ ] If it is **not** a fix: the true fix is named, costed, and asked about — **and you waited**
 - [ ] The summary claims exactly what the mechanism guarantees, no more
-
-## Related
-
-- **systematic-debugging** — the investigation process that gets you to the root cause. Use it first; use this one before you ship.
