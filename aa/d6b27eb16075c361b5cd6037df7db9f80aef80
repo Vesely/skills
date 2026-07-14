@@ -1,0 +1,24 @@
+root-cause/evals/results.md
+  s_3a92eb4c9cbb71::t_215564345fa1d2 1-89
+root-cause/evals/scenarios.md
+  s_3a92eb4c9cbb71::t_835fe78b007961 1-13,20-90
+  s_3a92eb4c9cbb71::t_dc0cd26b050b10 14-19
+root-cause/SKILL.md
+  s_3a92eb4c9cbb71::t_a5393aee79da52 3,8,10,12,14-20,22,24,26,28,30-31,33,35,37-39,41-45,47,49,51-54,56,60,62,64,66,68,72,76-78,80,84,86,88-91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "aad6b27eb16075c361b5cd6037df7db9f80aef80",
+  "prompts": {},
+  "sessions": {
+    "s_3a92eb4c9cbb71": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7f1fc80a-35dd-48a7-8aa5-df71f4a657b4",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
