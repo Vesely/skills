@@ -1,0 +1,23 @@
+root-cause/SKILL.md
+  s_3a92eb4c9cbb71::t_b2d212fcb8499c 1-104
+README.md
+  s_3a92eb4c9cbb71::t_5962dab1a8823f 55-60
+root-cause/README.md
+  s_3a92eb4c9cbb71::t_3360757dd599e9 1-11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "ba0234e054e9019cbde76292b9686f92e2699377",
+  "prompts": {},
+  "sessions": {
+    "s_3a92eb4c9cbb71": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7f1fc80a-35dd-48a7-8aa5-df71f4a657b4",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
