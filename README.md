@@ -52,6 +52,12 @@ Or via [skills.sh](https://skills.sh).
 
 ### Code quality
 
+- **root-cause** — Stops you shipping a patch and calling it a fix. Forces you to state the defect mechanism in one unhedged sentence, label what you are actually shipping (fix / mitigation / workaround), and refuse to let cost, risk or scope constraints quietly redefine the problem. Catches the two classic tells: the word "can't" (the thing you claim you cannot know *is* the root cause) and constraint laundering (your validation budget silently choosing the architecture). Complements `systematic-debugging`, which gets you *to* the root cause.
+
+  ```
+  npx skills@latest add Vesely/skills/root-cause
+  ```
+
 - **code-style** — Align newly written or changed code with the surrounding project's conventions — formatting, naming, imports, comments, idioms — learned from the codebase itself. Auto-detects your diff (uncommitted, or branch vs. the default branch), runs the project's own formatters/linters first, then fixes what tooling can't, with surgical, behavior-preserving edits. Works in any language or framework.
 
   ```
