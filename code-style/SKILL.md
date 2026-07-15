@@ -10,8 +10,11 @@ description: >-
   project, or invokes /code-style. Works in any language or framework — it
   discovers the rules from the repo rather than assuming them. Reach for this
   even when the user doesn't say the word "style" but clearly wants new code to
-  blend in with existing code — including trimming AI-generated over-commenting
-  down to the codebase's own comment density.
+  blend in with existing code. Also covers de-slopping AI-generated artifacts
+  from the diff — over-commenting, defensive checks or try/catch abnormal for
+  the code path, casts to any / type-ignore escape hatches, needless nesting —
+  so use it when the user says "remove AI slop", "de-slop", "this looks
+  AI-written", or wants AI artifacts cleaned from a branch.
 ---
 
 # Code Style
@@ -69,12 +72,22 @@ When the codebase is inconsistent, follow the **nearest, most-recent, most-relev
 
 Apply surgical edits so the changed code follows the conventions you found. Stay strictly within the scope from step 1. Keep the change set tight: if aligning one line forces a cascade into untouched code, stop and prefer the smaller consistent option, or flag it rather than sprawl.
 
+**De-slop pass.** In the same sweep, hunt the changed lines for AI-generated patterns a human maintainer of this repo wouldn't have written. The tell is always the same: the pattern is *inconsistent with the file and its neighbors*, not wrong in the abstract.
+
+- **Comments a human wouldn't add** — beyond the density trim from step 3: banner/section comments narrating obvious structure, docstrings on trivial private helpers when neighbors have none, comments addressed to the reviewer ("now we handle X", "this fixes the bug by…"). Remove them when they add no intent or constraint beyond what the code already shows.
+- **Defensive checks and try/catch abnormal for that area** — null-guards, existence checks, or catch blocks on trusted/validated code paths where neighbors call the same things bare. Remove only when the in-scope runtime path makes the branch unreachable AND evaluating the check has no observable effects, with that proof visible locally (e.g. a dominating validation or exhaustive branch). Types and neighboring reliance on the invariant are supporting evidence, not proof. Otherwise leave it and flag it.
+- **Type-escape hatches** — `as any` / `any` params, `@ts-ignore`, `# type: ignore`, casts or added optionality whose only purpose is silencing the checker. Replace with the correct type only when the change is local, type-only in that language/toolchain, and behavior-preserving; otherwise flag rather than launder.
+- **Dead fallbacks** — `|| default` / `?? default` on values that can't be absent, re-checking a condition guaranteed one line up. Apply the same local proof standard as for defensive checks; otherwise leave it and flag it.
+- **Needless nesting** — flag deeply nested conditionals when the file's own shape favors early returns / guard clauses; simplify only when the local rewrite is mechanically behavior-equivalent.
+
+Apply the same guardrails as everything else in this skill: preserve behavior, prefer minimal focused edits over rewrites, and never touch slop that predates the diff.
+
 ### 5. Verify you changed style, not meaning
 
 Confirm the edits are behavior-preserving and didn't break anything cheap to check:
 
 - Re-run the formatter/linter on the changed files if you ran one — it should now pass clean.
-- Re-read your diff: every edit should be cosmetic/naming/structure, nothing semantic.
+- Re-read your diff: every edit should be cosmetic/naming/structure and behavior-preserving, nothing semantic. For every removed dead check or fallback, re-verify the local redundancy proof.
 - If there's a fast type-check or the file's own test and it's quick, run it.
 
 ### 6. Summarize
