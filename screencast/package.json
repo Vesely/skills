@@ -1,0 +1,13 @@
+{
+  "name": "screencast",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "screencast": "bin/screencast.mjs"
+  },
+  "description": "Turn an agent-browser session into a polished product-demo video (auto-zoom, cursor, keystrokes, chapters) fully locally.",
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.55"
+  }
+}

@@ -88,6 +88,12 @@ Or via [skills.sh](https://skills.sh).
 
 ### Utilities
 
+- **screencast** — Turn an agent-browser session into a polished product-demo video, fully local and free. Records the browser flow the agent drives, then composites an MP4 with auto zoom-to-click, an animated cursor + trail, click ripples, a keystroke overlay, idle trimming, chapters (lower-thirds + embedded MP4 chapters), and a gradient/rounded/shadowed frame. Screen-Studio-style output, produced by the agent. Requires agent-browser, ffmpeg, Node.
+
+  ```
+  npx skills@latest add Vesely/skills/screencast
+  ```
+
 - **catbox** — Upload files to catbox.moe for free, anonymous hosting with direct links. No account needed.
 
   ```
