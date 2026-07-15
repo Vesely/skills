@@ -1,6 +1,6 @@
 ---
 name: tldr
-description: Compress the whole thread — the problem or feature being worked on and how it was solved — into a single TL;DR line, then propose exactly three terse next-step labels (≤8 words each, slash commands welcome) the user can take. Use whenever the user types `/tldr`, `/recap`, says "tldr", "tl;dr", "summarize and suggest next steps", "recap that", "what should I do next", "give me the gist", or otherwise asks for a quick summary of what's been going on plus suggestions for what to do next. Trigger even when the user phrases it casually ("ok so what now?", "give me the short version + next steps") — this skill exists exactly for those moments where a long thread needs distilling and a clear handoff to action.
+description: Compress the whole thread — the problem or feature being worked on and how it was solved — into a single TL;DR line, then propose exactly three terse next-step labels (≤8 words each, slash commands welcome) the user can take. Use whenever the user types `/tldr`, `/recap`, says "tldr", "tl;dr", "summarize and suggest next steps", "recap that", "what should I do next", "give me the gist", or otherwise asks for a quick summary of what's been going on plus suggestions for what to do next. Trigger even when the user phrases it casually ("ok so what now?", "give me the short version + next steps") — this skill exists exactly for those moments where a long thread needs distilling and a clear handoff to action. Use the "Variant: dyslexia-friendly visual preview" section on `/tldr visual` or `/tldr dyslexia`, or when the user asks for a dyslexia-friendly, visual, or cmux recap.
 ---
 
 # tldr
@@ -92,6 +92,17 @@ Avoid generic filler like "review the changes", "let me know if you have questio
 2. /commit
 3. /pr-feedback
 ```
+
+## Variant: dyslexia-friendly visual preview
+
+Triggers: `/tldr visual`, `/tldr dyslexia`, or any ask for a dyslexia-friendly, visual, or cmux recap. Write the recap in English by default; use another language only when the user asks for it.
+
+Keep the content contract (one recap plus exactly three next steps) but override the exact inline shape with a dyslexia-friendly layout: short lines, one idea per line, bold key words as anchors, large headings, generous whitespace, simple words, and a small table for status facts. Emoji as visual anchors are welcome. Stay minimal and direct: the recap, the three steps, at most one small status table and one or two cropped screenshots — nothing else.
+
+Open it as a cmux markdown page only when the user asks for a panel or preview, or the thread has something visual to show (a rendered page, UI change, chart). Otherwise answer inline in that layout. For the cmux page:
+
+- Write a temporary markdown file (prefer the scratchpad directory when one exists), then `cmux markdown open <path>`. The panel live-reloads, so updates just rewrite the file.
+- Embed screenshots as base64 data URIs (JPEG, cropped to the regions that prove the point, ~900px wide) — file paths do not render in the cmux viewer. Compose the file in bash (`base64 -i img.jpg` into a heredoc); data URIs are too large to write by hand.
 
 ## When to bend the rules
 
