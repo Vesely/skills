@@ -1,0 +1,19 @@
+code-style/SKILL.md
+  s_0680de8e9266a8::t_c66f5a0bb39dac 13-17,75-84,90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "72cc7d05b82cfb30638d2466611ea241e3048547",
+  "prompts": {},
+  "sessions": {
+    "s_0680de8e9266a8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "s_0680de8e9266a8",
+        "model": "unknown"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
