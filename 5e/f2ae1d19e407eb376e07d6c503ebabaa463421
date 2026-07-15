@@ -1,0 +1,19 @@
+tldr/SKILL.md
+  s_17e08056b012f1::t_139852d7f679f3 3,96-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "5ef2ae1d19e407eb376e07d6c503ebabaa463421",
+  "prompts": {},
+  "sessions": {
+    "s_17e08056b012f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eed29230-eca5-4b2d-95e9-3373e35d5bef",
+        "model": "claude-fable-5"
+      },
+      "human_author": "David Veselý <jsem@davidvesely.cz>"
+    }
+  }
+}
