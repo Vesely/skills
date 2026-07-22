@@ -1,11 +1,11 @@
 ---
 name: tldr
-description: Compress the whole thread — the problem or feature being worked on and how it was solved — into a single TL;DR line, then propose exactly three terse next-step labels (≤8 words each, slash commands welcome) the user can take. Use whenever the user types `/tldr`, `/recap`, says "tldr", "tl;dr", "summarize and suggest next steps", "recap that", "what should I do next", "give me the gist", or otherwise asks for a quick summary of what's been going on plus suggestions for what to do next. Trigger even when the user phrases it casually ("ok so what now?", "give me the short version + next steps") — this skill exists exactly for those moments where a long thread needs distilling and a clear handoff to action. Use the "Variant: dyslexia-friendly visual preview" section on `/tldr visual` or `/tldr dyslexia`, or when the user asks for a dyslexia-friendly, visual, or cmux recap.
+description: Compress the whole thread — the problem or feature being worked on and how it was solved — into a single TL;DR line, then propose up to three terse next-step labels (≤8 words each, slash commands welcome) the user can take. Use whenever the user types `/tldr`, `/recap`, says "tldr", "tl;dr", "summarize and suggest next steps", "recap that", "what should I do next", "give me the gist", or otherwise asks for a quick summary of what's been going on plus suggestions for what to do next. Trigger even when the user phrases it casually ("ok so what now?", "give me the short version + next steps") — this skill exists exactly for those moments where a long thread needs distilling and a clear handoff to action. Use the "Variant: dyslexia-friendly visual preview" section on `/tldr visual` or `/tldr dyslexia`, or when the user asks for a dyslexia-friendly, visual, or cmux recap.
 ---
 
 # tldr
 
-Distill the whole thread into one line — the problem or feature being worked on and how it was solved — then offer three concrete, takeable actions.
+Distill the whole thread into one line — the problem or feature being worked on and how it was solved — then offer up to three concrete, takeable actions.
 
 ## Why this exists
 
@@ -17,9 +17,11 @@ By default, summarize **the entire thread**: what problem or feature was being w
 
 Only narrow the scope when the user explicitly asks for it (e.g. "tldr that last message", "just the previous answer", "recap only what you just said") — then summarize just that slice instead.
 
+When the user points at a PR (number, URL, "this PR"), compress that PR instead: the problem, the fix, review findings and how they were handled, and current state (CI, merged, deployed). State only what you actually know — merged does not imply deployed.
+
 ## Output format
 
-Always use this exact shape — nothing before, nothing after:
+Use this exact shape (the visual variant and the rule-bending cases below aside) — nothing before, nothing after:
 
 ```
 **TL;DR:** <one sentence, ≤160 characters, no preamble>
@@ -36,8 +38,8 @@ Rules that make this shape work:
 - **No "In summary,", "To recap,", "Basically,"** or any other warm-up. Start with the substance.
 - **Each next step is a short, terse label — ideally 1–6 words.** Think menu items, slash commands, or chip labels: `Run tests`, `Apply fix`, `/ui-review`, `Pick option B`, `Open PR`. *Not* full sentences with file paths, rationale, or how-to detail. The user reading the recap doesn't need instructions — they already followed the conversation. They need a short menu of moves they can take. If a step needs explaining beyond the label, the label is wrong; pick a sharper one.
 - **Order the steps by what makes sense to do first**, not by importance. If step 2 only makes sense after step 1, that ordering is doing real work.
-- **Exactly three steps.** Not four "in case", not two "to keep it tight". Three is the contract — it's enough to give a sense of options without becoming a checklist the user has to triage.
-- **Use slash commands when one fits.** If the next move maps cleanly to an installed skill or command (`/commit`, `/ui-review`, `/pr-feedback`), prefer that over prose. It tells the user exactly what to type.
+- **Default to three steps — never pad to hit the count.** Each step, command or prose, must be called for by the thread's current state, doable right now, and not already done. If only two real moves exist, give two. A padded slot (a topically-related slash command after the work is already merged, "update docs" with nothing to update) costs more trust than a shorter list.
+- **Use slash commands when one fits — and check the precondition, not the topic.** The command must be runnable and useful *right now*: `/commit` needs uncommitted work, `/handoff-to-worktree` needs undone work to hand off, `/ui-review` needs UI changes. Topical similarity to the thread is not a fit.
 
 ## How to pick good next steps
 
@@ -45,7 +47,8 @@ The thread usually contains the raw material. Pull from where the work currently
 
 - **Loose ends the thread left open** — "we still need to verify X", "you might want to test Y" → those are next steps.
 - **The natural follow-up to whatever was just delivered** — if the work fixed a bug, step 1 is usually "ship it" (test, commit, open PR). If the thread ended on open options, step 1 is "pick one" framed as a decision.
-- **Adjacent moves the user hasn't thought of yet** — one of the three slots is well spent on something the thread didn't explicitly mention but that a careful reader would do anyway (write a test, update the docs, check the related call site).
+- **Adjacent moves the user hasn't thought of yet** — worth a slot only when current evidence makes it useful: something the thread didn't explicitly mention but that a careful reader would do anyway (write a test, update the docs, check the related call site).
+- **The user's own routine.** Prefer moves the user demonstrably makes after this kind of work — check memory files and project docs (post-merge checklists, support workflows) and what they did in similar past threads. After a merged PR that might be: verify the prod deploy, send the pending draft, update support docs.
 
 If the thread currently rests on a question to the user, the next steps should be ways to answer it or things to gather before answering.
 
@@ -83,21 +86,21 @@ Avoid generic filler like "review the changes", "let me know if you have questio
 3. Port mutations
 ```
 
-**Example 4 — when a slash command fits the next move:**
+**Example 4 — when slash commands fit the next moves (their preconditions hold: UI changed, work uncommitted, no PR yet):**
 
 ```
-**TL;DR:** Component looks ready — passes a11y check and matches the design system.
+**TL;DR:** Component built and passing a11y checks — changes still uncommitted, no PR yet.
 
 1. /ui-review
 2. /commit
-3. /pr-feedback
+3. Open PR
 ```
 
 ## Variant: dyslexia-friendly visual preview
 
 Triggers: `/tldr visual`, `/tldr dyslexia`, or any ask for a dyslexia-friendly, visual, or cmux recap. Write the recap in English by default; use another language only when the user asks for it.
 
-Keep the content contract (one recap plus exactly three next steps) but override the exact inline shape with a dyslexia-friendly layout: short lines, one idea per line, bold key words as anchors, large headings, generous whitespace, simple words, and a small table for status facts. Emoji as visual anchors are welcome. Stay minimal and direct: the recap, the three steps, at most one small status table and one or two cropped screenshots — nothing else.
+Keep the content contract (one recap plus up to three next steps) but override the exact inline shape with a dyslexia-friendly layout: short lines, one idea per line, bold key words as anchors, large headings, generous whitespace, simple words, and a small table for status facts. Emoji as visual anchors are welcome. Stay minimal and direct: the recap, the steps, at most one small status table and one or two cropped screenshots — nothing else.
 
 Open it as a cmux markdown page only when the user asks for a panel or preview, or the thread has something visual to show (a rendered page, UI change, chart). Otherwise answer inline in that layout. For the cmux page:
 
@@ -108,5 +111,5 @@ Open it as a cmux markdown page only when the user asks for a panel or preview, 
 
 - **The thread is trivial or a single short exchange.** Don't recap a recap. Tell the user "nothing much to compress here — next steps:" and skip the TL;DR line.
 - **User narrows the scope.** If they ask to tldr just the last message or a specific slice, honor it and summarize only that instead of the whole thread.
-- **There's nothing meaningful to do next.** Rare, but it happens (e.g. the work shipped and the deploy succeeded). In that case, give the TL;DR and explicitly say next steps are optional, then offer three *optional* moves (verify, document, monitor).
+- **There's nothing meaningful to do next.** Rare, but it happens (e.g. the work shipped, deployed, and verified). Give the TL;DR and say so — offer fewer steps or none rather than inventing optional ones.
 - **User asks for more or fewer steps.** Honor it. Three is the default, not a religion.
