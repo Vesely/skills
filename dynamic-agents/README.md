@@ -1,6 +1,6 @@
 # dynamic-agents
 
-Orchestrate a complex task across multiple agents with cost-aware model routing. Decomposes the task, routes each subtask to the cheapest model that handles it well (session model for judgment-heavy work, Sonnet for mechanical work, GPT-5.6-sol+ via Codex CLI for cross-model review), picks fan-out vs team topology, and presents a checkpoint plan for approval before spending tokens.
+Orchestrate a large task across multiple agents with cost-aware model routing. Decomposes the task, routes each subtask to the cheapest model that handles it well (session model for judgment-heavy work, Sonnet for mechanical work, Fable or GPT-5.6-sol+ via Codex CLI for the hardest nodes and cross-model review), picks fan-out vs team topology, presents the plan (gating on approval only for large or atypical runs), then executes and verifies.
 
 ## Install
 
