@@ -3,28 +3,75 @@
   "evals": [
     {
       "id": 0,
-      "prompt": "I want to add a CSV export option to the reporting module of my web app. There is an existing PDF export service under src/services/export/ that the new CSV exporter should mirror, it needs to be wired into the export menu component AND the report detail view, and the user-facing docs page needs updating. Split this work between multiple agents for me. Present your agent plan first and stop there, do not execute anything yet.",
-      "expected_output": "A decomposition with an agent plan table: exporter design/implementation routed to the session model (no model override), mechanical docs update and recon routed to sonnet, a Codex (GPT) cross-model review pass included, phased fan-out (not a team), and an explicit wait for approval.",
+      "name": "feature-split-routing",
+      "prompt": "I want to add a CSV export option to the reporting module of my web app. There is an existing PDF export service under src/services/export/ that the new CSV exporter should mirror, it needs to be wired into the export menu component AND the report detail view, and the user-facing docs page needs updating. Split this work between multiple agents and show me the plan first.",
+      "expected_output": "A decomposition with an agent plan table: exporter design/implementation on the session model (no override), the docs update routed to Sonnet, a Codex cross-model review pass, phased fan-out (not a team), the shared export-menu/report-view touchpoints owned by one agent, and a wait for approval because the run mutates files in parallel.",
       "files": [],
-      "assertions": [
-        "Plan contains a per-subtask routing table (or equivalent) that assigns a model/tier to each agent",
+      "expectations": [
+        "Plan contains a per-subtask routing table (or equivalent) assigning a model/tier to each agent",
         "Judgment-heavy work (exporter design/implementation, final synthesis) is left on the session model with no model override",
-        "Mechanical subtasks (docs update, recon/fact gathering) are routed to Sonnet",
+        "The mechanical docs update is routed to Sonnet",
         "Plan includes a Codex/GPT cross-model review pass on the implementation",
-        "Topology is phased fan-out (not a persistent team) and the plan explicitly stops to wait for approval"
+        "Topology is phased fan-out, not a persistent team and not TeamCreate (which does not exist)",
+        "The two shared wiring points (export menu component, report detail view) are assigned to a single owner or to the orchestrator's own synthesis step, rather than split across two agents editing them concurrently",
+        "The plan waits for the user's approval before launching, on its own initiative — the prompt never tells it to stop"
       ]
     },
     {
       "id": 1,
-      "prompt": "Audit all API route handlers under src/api/ in this repo for missing tenant scoping (handlers that should go through the requireTenant middleware but don't). There are a few dozen handler files. Fan out agents to cover it and give me a verified report. Show me your orchestration plan first and stop, do not run the audit yet.",
-      "expected_output": "A plan using Workflow or parallel agents: cheap (sonnet) scanners partitioned over handler files, judgment-heavy verification of suspected findings on the session model, adversarial verification before reporting, a coverage statement, and a checkpoint waiting for approval.",
+      "name": "audit-batching-and-sizing",
+      "prompt": "Audit all API route handlers under src/api/ in this repo for missing tenant scoping (handlers that should go through the requireTenant middleware but don't). There are about 40 handler files. Fan out agents to cover it — give me your orchestration plan.",
+      "expected_output": "A plan with a small batched fan-out (roughly 4-6 scanners partitioned over the 40 files, not one agent per file), cheap scanning on Sonnet, suspected findings confirmed by the orchestrator itself rather than by spawned verifier agents, and an explicit coverage statement.",
       "files": [],
-      "assertions": [
-        "Plan partitions the handler files across parallel scanner agents (fan-out, Agent tool or Workflow)",
-        "Cheap scanning/grepping work is routed to Sonnet",
-        "Suspected findings are verified on the session model and/or adversarially verified before being reported as fact",
-        "Plan addresses coverage (states what will and will not be covered, or how completeness is ensured)",
-        "Plan explicitly stops at a checkpoint to wait for user approval before spending tokens"
+      "expectations": [
+        "Scanner agents are batched over the file set — roughly 4-8 agents partitioned across the ~40 files, NOT one agent per file and NOT an unbounded fan-out",
+        "Cheap scanning/grepping work is routed to Sonnet, or to a read-only Explore agent",
+        "Suspected findings are confirmed against the code by the orchestrator in its own loop before being reported as fact",
+        "The plan does NOT spawn separate verifier/adversarial-review subagents to check the scanners' findings",
+        "Plan addresses coverage explicitly (what will and will not be covered, or how completeness is ensured)"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "small-run-no-over-gating",
+      "prompt": "/dynamic-agents Research how three competitors — Linear, Height, and Shortcut — each handle recurring or repeating tasks in their product: which pricing tier it lands in, the UX for setting one up, and the known limitations. Give me a comparison table at the end.",
+      "expected_output": "A compact plan (three parallel research legs on Sonnet, synthesis by the orchestrator), then an immediate launch — no approval checkpoint, because this is a small, explicitly invoked, read-only fan-out with no file mutation.",
+      "files": [],
+      "expectations": [
+        "A compact plan is shown before launching",
+        "The three research legs run in parallel as separate agents",
+        "The research legs are routed to Sonnet (a defined question), not left on the session model",
+        "The run launches immediately after showing the plan — it does NOT stop to ask for approval or permission",
+        "The final comparison table is synthesized by the orchestrator itself rather than delegated to a subagent"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "declines-fanout-not-worth-it",
+      "prompt": "I need to rename the `isActive` prop to `isEnabled` across three React components and update their tests. Worth fanning this out across dynamic agents? Give me your recommendation, and the plan if it's worth it.",
+      "expected_output": "A recommendation against fanning out: the task is small enough that writing self-contained briefs costs more than doing it inline. At most one agent, no Workflow, no team, no Codex review pass.",
+      "files": [],
+      "expectations": [
+        "Recommends against fanning this out across multiple agents",
+        "Gives the reason in cost terms — briefing/orchestration overhead exceeds the work itself, or one agent can finish it inline",
+        "Proposes at most one agent (or doing it directly in the main loop)",
+        "Does NOT propose the Workflow tool, a persistent team, or worktree isolation",
+        "Does NOT propose a Codex cross-model review pass for a change this small"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "hard-node-escalation-and-gate",
+      "prompt": "We're migrating auth from session cookies to JWT across a Next.js app. The token/refresh/rotation design is the genuinely hard part — we have SSR, edge middleware, and a mobile client sharing the same API, and getting rotation wrong logs everyone out. On top of that there are about 15 route handlers to mechanically update to the new helper, plus an auth docs page. Plan this across agents.",
+      "expected_output": "The token/rotation design stays on the session model or is escalated to Fable — never Sonnet. The ~15 route-handler updates are batched to Sonnet. Shared middleware/config is owned by one agent. A Codex cross-model review pass covers the security-sensitive implementation, and the run gates for approval before mutating files in parallel.",
+      "files": [],
+      "expectations": [
+        "The token/refresh/rotation design is routed to the session model or escalated to Fable (`model: \"fable\"`) — it is NOT routed to Sonnet",
+        "If Fable is proposed, it is justified as an escalation for the single hardest node, not applied to every subtask",
+        "The ~15 mechanical route-handler updates are routed to Sonnet and batched across a few agents rather than one agent per handler",
+        "Shared/cross-cutting files (edge middleware, auth config) are reserved to a single owner or to the orchestrator, not edited by parallel agents",
+        "Plan includes a Codex/GPT cross-model review pass, justified by the security-sensitive nature of the change",
+        "The plan waits for the user's approval before launching, on its own initiative — the prompt never tells it to stop"
       ]
     }
   ]
