@@ -1,11 +1,11 @@
 ---
 name: dynamic-agents
-description: Orchestrate a complex task across multiple agents with cost-aware model routing. Decomposes the task, routes each subtask to the cheapest model that handles it well (session model for hard work, Sonnet for mechanical work, GPT-5.5 or newer via Codex CLI for cross-model review), picks fan-out vs team topology, presents the plan (waiting for approval only on large or atypical runs), then executes. Use whenever the user invokes /dynamic-agents, says "dynamic agents" or "fan out dynamic", or hands over a large multi-part task (feature spanning several subsystems, audit, migration, research plus implementation) and wants top-tier quality at reasonable cost.
+description: Orchestrate a complex task across multiple agents with cost-aware model routing. Decomposes the task, routes each subtask to the cheapest model that handles it well (session model for hard work, Sonnet for mechanical work, GPT-5.6-sol or newer via Codex CLI for cross-model review), picks fan-out vs team topology, presents the plan (waiting for approval only on large or atypical runs), then executes. Use whenever the user invokes /dynamic-agents, says "dynamic agents" or "fan out dynamic", or hands over a large multi-part task (feature spanning several subsystems, audit, migration, research plus implementation) and wants top-tier quality at reasonable cost.
 ---
 
 # Dynamic Agents
 
-Top-tier output quality with deliberate cost control: the orchestrator (you) and all judgment-heavy work stay on the session's strongest model, mechanical work goes to Sonnet, and a second model family (GPT-5.5 or newer, via the Codex CLI) is used where it genuinely adds value.
+Top-tier output quality with deliberate cost control: the orchestrator (you) and all judgment-heavy work stay on the session's strongest model, mechanical work goes to Sonnet, and a second model family (GPT-5.6-sol or newer, via the Codex CLI) is used where it genuinely adds value.
 
 ## 1. Decompose
 
@@ -17,11 +17,11 @@ Break the task into subtasks with explicit boundaries: input, required output, w
 |---|---|---|
 | Session model (inherit) | design, architecture, synthesis, non-trivial implementation, debugging, final decisions, anything ambiguous | omit `model` |
 | Sonnet | mechanical work with a clear spec: codebase searches, fact gathering, research with a defined question, scraping/data extraction, scripted browser/device QA (explicit steps and pass criteria), low-risk well-specified single-file edits, format conversions, boilerplate from an existing pattern | `model: "sonnet"` |
-| GPT-5.5+ via Codex CLI | cross-model code review, second opinion on a diagnosis, getting unstuck, copywriting drafts | `subagent_type: "codex:codex-rescue"` (Agent tool) or `agentType: 'codex:codex-rescue'` (Workflow) |
+| GPT-5.6-sol+ via Codex CLI | cross-model code review, second opinion on a diagnosis, getting unstuck, copywriting drafts | `subagent_type: "codex:codex-rescue"` (Agent tool) or `agentType: 'codex:codex-rescue'` (Workflow) |
 
 - Never set a model for judgment-heavy work. Inheriting keeps it on the session default, with nothing to maintain when the user upgrades models.
 - Be conservative about "mechanical": a non-trivial task misrouted to Sonnet costs more in rework than it saves. When unsure, inherit.
-- Codex sees no conversation context and is an external CLI, not a `model:` value. Inline everything it needs: the task, the actual diff or file contents (not just paths when the work is review), constraints, output format. The exact model comes from Codex CLI configuration, but it must be GPT-5.5 or newer; when uncertain, check the config (e.g. `~/.codex/config.toml`) rather than asking the model, which misreports its version. Never pass a `--model` override (specialized variants like gpt-5-codex are not the preferred mainline model); if the configured model is older than GPT-5.5, say so and route that pass to an inherited-model agent instead. It bills to the user's Codex subscription, outside API metering.
+- Codex sees no conversation context and is an external CLI, not a `model:` value. Inline everything it needs: the task, the actual diff or file contents (not just paths when the work is review), constraints, output format. The exact model comes from Codex CLI configuration, but it must be GPT-5.6-sol or newer; when uncertain, check the config (e.g. `~/.codex/config.toml`) rather than asking the model, which misreports its version. Never pass a `--model` override (specialized variants like gpt-5-codex are not the preferred mainline model); if the configured model is older than GPT-5.6-sol, say so and route that pass to an inherited-model agent instead. It bills to the user's Codex subscription, outside API metering.
 - If `codex:codex-rescue` is unavailable (plugin not installed), route that pass to an inherited-model agent instead and note the substitution in the plan.
 - Cross-model review is a quality tool, not only a cost tool: a different model family finds different issues. Default to one Codex review pass (one round, not a review-fix-review loop) on any substantial implementation this skill produces — multi-file changes, migrations, security-sensitive code — and list it as a row in the checkpoint plan.
 
