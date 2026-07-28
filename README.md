@@ -94,10 +94,10 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/screencast
   ```
 
-- **catbox** — Upload files to catbox.moe for free, anonymous hosting with direct links. No account needed.
+- **share-file** — Upload a screenshot, screencast, GIF, PDF or any artifact to your own Cloudflare R2 bucket and get back a public direct URL that expires on its own. Default retention 90 days, overridable per upload (`7d`, `30d`, `365d`, `keep`) — expiry is enforced by R2 lifecycle rules on TTL-named prefixes, so files clean themselves up. Sets the correct `Content-Type` so images and GIFs render inline in GitHub PRs instead of downloading. No API keys: auth is `wrangler login`, and the public host is discovered from your own bucket at runtime, so the skill works unchanged on any Cloudflare account. Run `share-file setup` once to create the bucket, lifecycle rules, and public access. Free at normal volume (R2 free tier: 10 GB stored, unlimited egress).
 
   ```
-  npx skills@latest add Vesely/skills/catbox
+  npx skills@latest add Vesely/skills/share-file
   ```
 
 - **temp-email** — Create disposable email inboxes via tempmail.lol. Rotating domains, no API key, just curl. Great for E2E tests and verification flows.
