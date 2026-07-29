@@ -399,8 +399,16 @@ def resume_binding(ws_id, surface_id=None):
 
 
 def argv_session_id(cmd):
-    """`--resume <uuid>` out of a process argv (claude's own or its wrapper)."""
-    m = re.search(r"--resume['\"\s]+([0-9a-f]{8}-[0-9a-f-]{27})", cmd)
+    """The session uuid out of a process argv (claude's own or its wrapper).
+
+    Both spellings matter. cmux starts a fresh agent with `--session-id`, and
+    matching only `--resume` left 18 of 54 live sessions here invisible: they
+    fell through to the last-resort transcript scan even though their id was
+    sitting in plain sight, and `unpark`'s "already running" guard could not
+    see them at all.
+    """
+    m = re.search(r"--(?:resume|session-id)['\"\s]+([0-9a-f]{8}-[0-9a-f-]{27})",
+                  cmd)
     return m.group(1) if m else None
 
 
@@ -473,12 +481,22 @@ def resolve_session(pid, cmd, ws_id, surface_id, cwd):
         # filename stem. Nothing that fails this gets near a shell.
         if not sid or not SESSION_ID_RE.match(str(sid)):
             continue
-        use_cwd = cand.get("cwd") or cwd
-        if not use_cwd:
-            continue
-        t = project_dir(use_cwd) / f"{sid}.jsonl"
-        if t.exists():
-            return sid, str(t), cand.get("command"), cand["source"], use_cwd
+        # Try the candidate's own cwd first, then the process's. cmux's binding
+        # records the REPO ROOT for an agent running in a worktree under it, so
+        # insisting on the binding's cwd threw away an authoritative session id
+        # and fell through to the transcript scan.
+        for use_cwd in (cand.get("cwd"), cwd):
+            if not use_cwd:
+                continue
+            t = project_dir(use_cwd) / f"{sid}.jsonl"
+            if not t.exists():
+                continue
+            # Replay the recorded command ONLY if it belongs to the cwd we
+            # matched; it starts with `cd <binding cwd>`, so reusing it after
+            # falling back to the process cwd would resume in the wrong tree.
+            command = (cand.get("command") if use_cwd == cand.get("cwd")
+                       else command_from_argv(cmd, sid, use_cwd))
+            return sid, str(t), command, cand["source"], use_cwd
 
     sid, transcript, source = session_id_of(pid, cwd)
     if sid and SESSION_ID_RE.match(sid):
@@ -645,6 +663,30 @@ def classify(procs, table=None):
 
     claude = [p for p in claude_all if not has_claude_ancestor(p["pid"])]
     return claude, dev, browser
+
+
+def tree_rss(procs, table):
+    """RSS of everything `kill_tree` would actually take, deduplicated.
+
+    Summing only the matched roots undercounted badly — a claude session's
+    subagents, MCP servers and node helpers are killed with it but were never
+    counted, so a workspace reporting 67 MB was really holding 208 MB. Measured
+    across 38 live workspaces: 4.5 GB reported vs 5.2 GB actually killed.
+
+    (RSS double-counts pages shared between processes, so the true figure sits
+    somewhere below this — but this is the set of processes that go.)
+    """
+    kids = {}
+    for pid, info in table.items():
+        kids.setdefault(info["ppid"], []).append(pid)
+    seen, stack = set(), [x["pid"] for x in procs]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        stack.extend(kids.get(cur, []))
+    return sum(table[c]["rss"] for c in seen if c in table)
 
 
 def kill_tree(pid, sig=15):
@@ -1011,7 +1053,7 @@ def collect(spaces=None):
             "window_index": w["window_index"],
             "parked": bool(entry),
             "bytes": (entry.get("freed_bytes", 0) if entry
-                      else sum(p["rss"] for p in procs)),
+                      else tree_rss(procs, table)),
             "state": (state + " (stale)") if is_stale else (state or "-"),
             "busy": state.lower() in BUSY_STATES and not is_stale,
             "dev": len(dev), "browser": len(browser),
@@ -1151,6 +1193,35 @@ def transcript_age(path):
         return float("inf")
 
 
+def unsent_input(ws_id, surface=None):
+    """Text the user typed but has not submitted, or messages queued behind the
+    turn. Killing the session throws both away with no record anywhere.
+
+    Read off the screen, because nothing else exposes it: cmux's status pill,
+    the process table and the transcript all describe what claude has already
+    accepted, and a draft is by definition not that.
+
+    The agent's input box is a `>` line fenced by box rules; requiring the rule
+    above it is what stops a plain shell prompt (starship uses the same glyph)
+    from reading as a draft.
+    """
+    args = ["read-screen", "--workspace", ws_id]
+    if surface:
+        args += ["--surface", surface]
+    lines = cmux(*args, check=False, retries=0).splitlines()
+    for i, line in enumerate(lines):
+        body = line.strip()
+        if not body or body[0] not in "\u276f>":
+            continue
+        above = lines[i - 1].strip() if i else ""
+        if len(above) < 20 or set(above) - set("\u2500-"):
+            continue                       # not the fenced input box
+        rest = body[1:].strip()
+        if rest:
+            return rest
+    return ""
+
+
 def busy_verdict(state, sessions):
     """Decide whether a turn is really in flight. -> (pill_was_stale, refusal)
 
@@ -1198,6 +1269,16 @@ def park_one(w, by_ws, table, dry=False, force=False):
         res["msg"] = "no claude session"
         return res
 
+    # A draft exists ONLY in the agent's input box — no transcript, no process
+    # state, nothing on disk — so killing the session is the one operation that
+    # destroys it silently. Checked before anything expensive, and per tab.
+    if not force:
+        for c in claude:
+            draft = unsent_input(w["id"], c.get("surface"))
+            if draft:
+                res["msg"] = f"unsent text in the prompt: {draft[:40]!r}"
+                return res
+
     state = workspace_status(w["id"]).get("claude_code", "")
     if cpu_sample([p["pid"] for p in claude]) > 15.0 and not force:
         res["msg"] = "busy (cpu)"
@@ -1230,7 +1311,7 @@ def park_one(w, by_ws, table, dry=False, force=False):
                                 " min — treated as idle")
 
     cwd = sessions[0]["cwd"]
-    freed = sum(p["rss"] for p in procs)
+    freed = tree_rss(procs, table)
     res["freed"] = freed
     if dry:
         res["ok"] = True

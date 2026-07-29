@@ -47,6 +47,13 @@ There is no such thing as "the current workspace" outside a cmux pane: cmux's
 `selected` flag is per *window*, so falling back to it made `park park .` from
 a plain Terminal park one workspace in every window at once.
 
+Reported sizes are the RSS of the **whole descendant tree**, because that is
+what `kill_tree` takes. Counting only the matched roots undercounted badly — a
+workspace reporting 67 MB was really holding 208 MB, and across 38 live
+workspaces the totals were 4.5 GB reported against 5.2 GB actually killed.
+(RSS double-counts pages shared between processes, so the memory genuinely
+returned to the system is somewhat lower; this is the set of processes that go.)
+
 `ls` groups by window — window = project in this user's mental model — and gives a
 per-window "parkable" total, which is the number to quote when offering to park.
 `--json` emits the same rows for scripting.
@@ -254,6 +261,12 @@ absolute path happily, at which point `unlink()` deletes something else.
 
 ## Rules
 
+- **Never park a session with unsent text in the prompt.** A draft lives only
+  in the agent's input box — not in the transcript, not in the process table,
+  nowhere on disk — so killing the session is the one operation that destroys it
+  silently. `unsent_input` reads it off the screen (the `>` line fenced by box
+  rules; requiring the rule above it is what stops a shell prompt reading as a
+  draft) and park refuses, quoting the text back.
 - **Never park a session mid-turn.** The gate is the `claude_code` status pill
   (`Running` = a turn is in flight) corroborated by a CPU sample. About a third
   of workspaces carry **no pill at all**, and a session blocked on a slow tool
@@ -308,6 +321,21 @@ a workspace at `/repo` cannot swallow a nested worktree workspace at
 
 Getting this wrong resumes **someone else's conversation**, which is exactly the
 failure that made cmux's own hibernation untrustworthy. Sources, best first:
+
+`argv_session_id` matches **both** `--resume` and `--session-id`. cmux starts a
+fresh agent with the latter, and matching only `--resume` left 18 of 54 live
+sessions unable to use this path — they fell through to the last-resort scan
+with their id in plain sight, and `unpark`'s "already running" guard could not
+see them at all.
+
+A binding's `cwd` is also tried against the **process's own** cwd, because cmux
+records the repo root for an agent running in a worktree beneath it. Insisting
+on the binding's cwd discarded an authoritative id and fell through to the scan.
+The recorded command is only replayed when it belongs to the cwd that matched —
+it begins `cd <binding cwd>`, so reusing it after the fallback would resume in
+the wrong tree. Measured after both fixes: 39 live sessions, all resolved by
+binding or argv, **none** by lsof or scan, and no two workspaces resolving to the
+same session.
 
 1. **`cmux surface resume get --json`** → `resume_binding.checkpoint_id`.
    Maintained by cmux's Claude Code hook, and it carries the **original command
