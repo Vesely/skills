@@ -35,8 +35,18 @@ PARKED_COLOR = "Charcoal"
 # are regex-constrained, but the last-resort scan returns a raw FILENAME stem,
 # so a file called `x; touch /tmp/PWNED #.jsonl` would execute on unpark.
 SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
-# How often the picker re-scans on its own (seconds).
-REFRESH_SECONDS = 6.0
+# How often the picker re-scans on its own while its tab is on screen, and how
+# stale the list must be for coming back to the tab to trigger another scan.
+# A scan is ~1.5 s of socket round-trips and a system-wide `ps`, so a tool that
+# exists to reclaim resources must not burn them in the background: off screen
+# it does not scan at all (see FOCUS_ON), and nothing there can change without
+# the user, who would have to come back to see it.
+REFRESH_SECONDS = 30.0
+FOCUS_REFRESH_GAP = 3.0
+# How long the draw loop waits for a key. Short while something is in flight so
+# the spinner animates, longer when idle, longest off screen — getch still
+# returns the instant a key arrives, so none of this costs responsiveness.
+TICK_BUSY_MS, TICK_IDLE_MS, TICK_HIDDEN_MS = 120, 400, 2000
 # How long a "Running" pill must go unbacked by transcript writes before it is
 # treated as stale. Long on purpose: one tool call can legitimately write
 # nothing while it runs.
@@ -1770,6 +1780,52 @@ def focus_workspace(row, ws_by_ref):
 HELP_LINE = ("↑↓/jk move   enter freeze/unfreeze   a whole window   "
              "f focus   r refresh   q quit")
 
+# DECSET 1004: the terminal reports every focus change as CSI I / CSI O. Probed
+# against cmux — it fires on all three ways the tab leaves the screen (another
+# workspace in the window, another cmux window, another app entirely), which is
+# exactly the signal needed to stop scanning for nobody.
+FOCUS_ON, FOCUS_OFF = "\033[?1004h", "\033[?1004l"
+
+
+def focus_reporting(on):
+    """Ask the terminal for focus events (and always turn them back off).
+
+    Left enabled after exit, the shell that inherits the tty gets `[I`/`[O`
+    typed into its prompt on every window switch, so the disable has to run on
+    every exit path, crash included.
+    """
+    try:
+        sys.stdout.write(FOCUS_ON if on else FOCUS_OFF)
+        sys.stdout.flush()
+    except OSError:                 # a closed tty is not worth dying over
+        pass
+
+
+def focus_change(stdscr, k, tick_ms):
+    """True/False when a key is a focus report, None when it is anything else.
+
+    ncurses hands these over one of two ways. When the terminfo entry knows
+    focus reporting it swallows the sequence and returns a named key — that is
+    what cmux does (TERM=xterm-ghostty, kxIN/kxOUT), so parsing the raw bytes
+    alone silently never fires. Otherwise the sequence arrives as-is, and its
+    leading ESC would read as the quit key, so it has to be claimed here.
+    """
+    if k > 255:
+        try:
+            name = curses.keyname(k)
+        except ValueError:
+            return None
+        return {b"kxIN": True, b"kxOUT": False}.get(name)
+    if k != 27:
+        return None
+    stdscr.timeout(0)       # the rest of the sequence is already buffered
+    try:
+        rest = "".join(chr(c) for c in (stdscr.getch(), stdscr.getch())
+                       if c != -1)
+    finally:
+        stdscr.timeout(tick_ms)
+    return {"[I": True, "[O": False}.get(rest)
+
 
 def _put(win, y, x, text, attr=0):
     """Write one line, truncated by CHARACTERS.
@@ -1838,7 +1894,8 @@ def _picker(stdscr, rows, ws_by_ref, reload):
     """
     curses.curs_set(0)
     stdscr.keypad(True)
-    stdscr.timeout(120)  # animate the in-flight spinner
+    stdscr.timeout(TICK_BUSY_MS)  # animate the in-flight spinner
+    focus_reporting(True)
     use_color = curses.has_colors()
     if use_color:
         curses.start_color()
@@ -1874,6 +1931,7 @@ def _picker(stdscr, rows, ws_by_ref, reload):
     cur, top = selectable[0], 0
     jobs, lock = {}, threading.Lock()   # ref -> {"verb","done","ok","msg"}
     pending, want_reload, stop = [None], [False], threading.Event()
+    onscreen = [True]   # flipped by the terminal's focus reports
 
     def refresher():
         """Re-scan in the background so the list tracks reality on its own.
@@ -1882,10 +1940,14 @@ def _picker(stdscr, rows, ws_by_ref, reload):
         thread. Results are staged and only swapped in when nothing is in
         flight — worker threads mutate the very row dicts on screen, and
         replacing them mid-kill would strand those mutations.
+
+        Off screen it does not scan at all: nobody is reading the list, and the
+        picker has no notifications to miss. Coming back re-scans immediately,
+        so what you look at is never the state you left behind.
         """
         while not stop.wait(1.0):
-            if (not want_reload[0]
-                    and time.time() - refresher.last < REFRESH_SECONDS):
+            due = time.time() - refresher.last >= REFRESH_SECONDS
+            if not want_reload[0] and not (onscreen[0] and due):
                 continue
             want_reload[0] = False
             refresher.last = time.time()
@@ -2013,12 +2075,23 @@ def _picker(stdscr, rows, ws_by_ref, reload):
         _put(stdscr, h - 1, 0, HELP_LINE.ljust(w - 1), curses.A_DIM)
         stdscr.refresh()
 
+        tick_ms = (TICK_BUSY_MS if inflight
+                   else TICK_IDLE_MS if onscreen[0] else TICK_HIDDEN_MS)
+        stdscr.timeout(tick_ms)
         try:
             k = stdscr.getch()
         except KeyboardInterrupt:
             k = ord("q")
         if k == -1:
             continue  # timeout: just redraw
+        seen = focus_change(stdscr, k, tick_ms)
+        if seen is not None:
+            onscreen[0] = seen
+            # Coming back is the one moment the list has to be true, but a
+            # flurry of tab switches must not queue up scans behind itself.
+            if seen and time.time() - refresher.last >= FOCUS_REFRESH_GAP:
+                want_reload[0] = True
+            continue
         if k in (ord("q"), 27):
             with lock:
                 busy = [r for r, j in jobs.items() if not j["done"]]
@@ -2095,7 +2168,13 @@ def cmd_pick(argv):
                             for t in terms)]
         return sp, fresh
 
-    curses.wrapper(_picker, rows, ws_by_ref, reload)
+    try:
+        curses.wrapper(_picker, rows, ws_by_ref, reload)
+    finally:
+        # The picker turns focus reports on; they have to go off even if it
+        # died, or the shell that gets the tty back has `[I`/`[O` typed into
+        # its prompt every time the window changes.
+        focus_reporting(False)
     print()
 
 

@@ -74,12 +74,34 @@ and **leaves the picker open** — glancing at a workspace and coming straight b
 to the list is the normal move, and closing it every time made `f` useless for
 that.
 
-The list **re-scans itself every ~6 s**, and `r` forces it. A scan is ~1.5 s of
-socket round-trips, so it runs on a background thread and the result is only
-swapped in when nothing is mid-freeze: worker threads mutate the very row dicts
-on screen, and replacing them mid-kill would strand those mutations. The cursor
-stays on the same workspace across a refresh — a list that jumps while you are
-aiming at a row is worse than one that does not refresh.
+The list **re-scans itself every ~30 s while its tab is on screen, and not at
+all while it is not**; `r` forces a scan, and coming back to the tab triggers
+one immediately (throttled to one per 3 s, or a flurry of tab switches queues
+scans behind each other). A scan is ~1.5 s of socket round-trips, so it runs on
+a background thread and the result is only swapped in when nothing is
+mid-freeze: worker threads mutate the very row dicts on screen, and replacing
+them mid-kill would strand those mutations. The cursor stays on the same
+workspace across a refresh — a list that jumps while you are aiming at a row is
+worse than one that does not refresh.
+
+Off screen there is nobody to read the list and nothing to miss (the picker has
+no notifications), so scanning there is pure waste — measured live: 155 child
+processes per 45 s on screen, **0 per 60 s off screen**, and a scan within 20 s
+of coming back. The signal is the terminal's own focus reporting (DECSET 1004),
+which cmux fires for all three ways a tab leaves the screen: another workspace
+in the window, another cmux window, another app entirely. Two things about
+reading it back:
+
+- Handle **both** deliveries. With `TERM=xterm-ghostty` — what cmux sets —
+  ncurses already knows focus reporting and swallows the sequence, returning the
+  named keys `kxIN`/`kxOUT` (match on `curses.keyname`, the numeric codes are
+  assigned at runtime). Parsing the raw `ESC [ I` bytes alone therefore fires
+  *never*, silently, and the picker just keeps scanning. Terminals whose
+  terminfo lacks it deliver the raw sequence, whose leading ESC would otherwise
+  read as the quit key.
+- Turn the mode **off on every exit path**, crash included. Left enabled, the
+  shell that inherits the tty gets `[I`/`[O` typed into its prompt on every
+  window switch.
 
 `a` toggles the whole window and is the one bulk action, so it still asks for a
 y/N confirmation. That gate exists because a shell command typed into a
@@ -406,7 +428,10 @@ There is no way to add a freeze/unfreeze item to cmux's workspace or tab
 right-click menu, and no user-definable keyboard shortcuts — those menus are
 built into the app and `cmux docs settings` exposes no extension point. The
 supported equivalent is a **Dock control** running the picker in the right
-sidebar, where the auto-refresh keeps it current:
+sidebar. Note the seam with the focus-driven refresh above: a dock panel is
+visible but never focused, so it keeps its 30 s cadence only until you click
+into it and back out — after that it waits for you to click in again, or for
+`r`.
 
 ```json
 { "controls": [
