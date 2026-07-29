@@ -1,0 +1,2023 @@
+#!/usr/bin/env python3
+"""Park idle cmux workspaces: free their RAM, keep them open as TODO markers.
+
+A Claude session lives on disk (~/.claude/projects/<enc-cwd>/<session-id>.jsonl);
+the ~150 MB RSS is a re-derivable runtime cache. Parking records the two
+coordinates needed to rebuild it (cwd + session id) in a ledger OUTSIDE cmux,
+then kills the process. The workspace, pane, shell and git worktree are never
+touched.
+
+The ledger is the durable truth on purpose: cmux's own hibernation stores resume
+state inside cmux, so a corrupted cmux state loses the process AND the pointer.
+"""
+
+import curses
+import json
+import locale
+import os
+import re
+import shlex
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+
+LEDGER = Path.home() / ".claude" / "parked"
+PILL_KEY = "parked"
+PARKED_COLOR = "Charcoal"
+# A session id ends up inside a command run by /bin/sh. The lsof and argv paths
+# are regex-constrained, but the last-resort scan returns a raw FILENAME stem,
+# so a file called `x; touch /tmp/PWNED #.jsonl` would execute on unpark.
+SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+# How often the picker re-scans on its own (seconds).
+REFRESH_SECONDS = 6.0
+
+# A turn is in flight -> never park. Anything else is fair game.
+BUSY_STATES = {"running", "working", "thinking", "compacting"}
+
+# Matching these by substring is what makes parking dangerous: kill_tree takes
+# a whole descendant tree, so one loose match kills an editor with unsaved
+# buffers. A bare \b hit `vim vite.config.ts` (word boundary), `rg webpack src/`
+# (the name as an ARGUMENT) and `/node_modules/vite/.../esbuild` (a PATH
+# SEGMENT). So a bare binary name only counts when it is the command being run
+# -- see `runs_binary`. Under-matching just leaves a dev server running;
+# over-matching loses the user's work.
+DEV_BINARIES = {"vite", "webpack", "rollup", "parcel", "nodemon", "nuxi",
+                "ts-node-dev", "uvicorn", "django"}
+BROWSER_BINARIES = {"agent-browser", "playwright", "puppeteer"}
+# Multi-word forms are unambiguous enough to match anywhere in the line.
+DEV_SERVER_RE = re.compile(
+    r"(?:^|\s)(?:next dev|astro dev|nuxt dev|remix dev|turbo run dev|"
+    r"bun --hot|(?:npm|pnpm|yarn|bun) (?:run )?dev(?::[\w.-]+)?|rails s|flask run|"
+    r"php artisan serve|hugo server|jekyll serve|wrangler dev)(?=\s|$)"
+)
+TEST_BROWSER_RE = re.compile(
+    r"Chrome for Testing|chromiumdev_profile|chrome-for-testing"
+)
+# A dev server is often launched through one of these, so the name we want is
+# the first token that is not the interpreter or one of its flags.
+LAUNCHERS = {"node", "npx", "bun", "deno", "python", "python3", "-m", "exec"}
+# Launcher flags that swallow the next token, so `npx --package vite prettier`
+# is prettier and not vite. `-m` belongs in LAUNCHERS, not here: `python -m
+# uvicorn app` must read THROUGH it to uvicorn, not skip past it.
+VALUE_FLAGS = {"--package", "-p", "--loader", "--require", "-r", "-c"}
+# Never classify these as anything killable, whatever else the line contains.
+# `git commit -m "npm run dev broke"` and `vim vite.config.ts` are the user's
+# work; a phrase appearing as an ARGUMENT must never cost them a buffer.
+NEVER_KILL = {"vim", "nvim", "vi", "emacs", "nano", "micro", "hx", "helix",
+              "less", "more", "tail", "head", "cat", "bat", "man",
+              "rg", "grep", "ag", "ack", "fzf", "git", "code", "subl"}
+CLAUDE_BINARIES = {"claude"}
+
+
+# --- Concurrency + feedback --------------------------------------------------
+def pmap(fn, items, workers=24):
+    """Run fn over items concurrently.
+
+    Everything slow here is I/O-bound: cmux socket round-trips (~256 ms each)
+    and git subprocesses.
+    """
+    items = list(items)
+    if not items:
+        return []
+    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as ex:
+        return list(ex.map(fn, items))
+
+
+class Spinner:
+    """Immediate feedback on stderr while a scan runs.
+
+    A scan takes a second or two and silence reads as a hang. Silent when
+    stderr is not a terminal.
+    """
+
+    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, text):
+        self.text = text
+        self.on = sys.stderr.isatty()
+        self._stop = threading.Event()
+        self._t = None
+
+    def _run(self):
+        i = 0
+        while not self._stop.wait(0.08):
+            sys.stderr.write(
+                f"\r\033[2K  {self.FRAMES[i % len(self.FRAMES)]} {self.text}")
+            sys.stderr.flush()
+            i += 1
+
+    def __enter__(self):
+        if self.on:
+            self._t = threading.Thread(target=self._run, daemon=True)
+            self._t.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._t:
+            self._t.join(timeout=0.5)
+        if self.on:
+            sys.stderr.write("\r\033[2K")
+            sys.stderr.flush()
+
+
+# --- cmux plumbing -----------------------------------------------------------
+def cmux(*args, check=True, retries=2):
+    """Run a cmux command. The socket fails transiently, so read paths retry.
+
+    Mutating calls must pass `retries=0` (see `cmux_do`): a nonzero exit after
+    the write already landed is itself a transient-socket symptom, and retrying
+    `send` a third time leaves `park unpark .park unpark .park unpark .` typed
+    at the prompt.
+    """
+    env = {**os.environ, "CMUX_QUIET": "1"}
+    last = ""
+    for attempt in range(retries + 1):
+        r = subprocess.run(
+            ["cmux", *args], capture_output=True, text=True, env=env
+        )
+        if r.returncode == 0:
+            return r.stdout
+        last = r.stderr.strip()
+        if attempt < retries:
+            time.sleep(0.4 * (attempt + 1))
+    if check:
+        raise RuntimeError(f"cmux {' '.join(args)}: {last}")
+    return ""
+
+
+def cmux_do(*args):
+    """A cmux call that changes state: never retried, never raises.
+
+    Returns True when cmux reported success, so callers can stop claiming an
+    action succeeded when it did not.
+    """
+    env = {**os.environ, "CMUX_QUIET": "1"}
+    r = subprocess.run(["cmux", *args], capture_output=True, text=True,
+                       env=env, check=False)
+    return r.returncode == 0
+
+
+def send_text(text, workspace, surface=None, submit=False):
+    """Type text at a prompt, optionally pressing enter after it.
+
+    `cmux send` interprets the two-character sequences \\n, \\r and \\t, and
+    passes every other backslash through untouched — there is no escape for a
+    literal backslash, so the payload must go verbatim. (Doubling backslashes
+    "to be safe" corrupts cmux's recorded resume commands, which contain
+    backslash-quote runs, into a command the shell cannot find.)
+
+    Enter is a real newline BYTE on the same call, not a second `send-key`.
+    Splitting the two raced the shell: against a slow prompt the text landed
+    and the enter did not, leaving a correct resume command typed but never
+    run — the workspace reported "resumed" while sitting at a shell. A literal
+    newline is not one of the sequences above, so one atomic call is both safer
+    and simpler.
+    """
+    args = ["send", "--workspace", workspace]
+    if surface:
+        args += ["--surface", surface]
+    # `--` so a payload that happens to start with a dash is text, not flags.
+    return cmux_do(*args, "--", text + ("\n" if submit else ""))
+
+
+def cmux_json(*args):
+    return json.loads(cmux("--id-format", "both", *args, "--json"))
+
+
+def list_windows():
+    out, wins = cmux("list-windows"), []
+    for line in out.splitlines():
+        # The selected window is marked with a leading "*" — without allowing
+        # for it, whichever window the user is currently in silently vanishes.
+        m = re.match(r"\s*\*?\s*(\d+):\s+(\S+)", line)
+        if m:
+            wins.append({"index": int(m.group(1)), "id": m.group(2)})
+    return wins
+
+
+def all_workspaces():
+    """Every workspace across every window. `workspace list` is per-window."""
+    wins = list_windows()
+
+    def fetch(win):
+        try:
+            return win, cmux_json("workspace", "list", "--window", win["id"])
+        except (RuntimeError, json.JSONDecodeError) as ex:
+            # Never silent: a dropped window would hide workspaces from `ls`
+            # and make an explicit target look nonexistent.
+            print(f"warning: could not list window {win['index']} "
+                  f"({win['id'][:8]}): {ex}", file=sys.stderr)
+            return win, None
+
+    seen, out = set(), []
+    for win, data in pmap(fetch, wins):
+        if data is None:
+            continue
+        for ws in data.get("workspaces", []):
+            if ws["id"] in seen:
+                continue
+            seen.add(ws["id"])
+            ws["window_id"] = data.get("window_id", win["id"])
+            ws["window_index"] = win["index"]
+            # cmux's own window refs are 1-based while list-windows indexes
+            # from 0, so keep the ref and prefer it when resolving `window:N`.
+            ws["window_ref"] = data.get("window_ref", "")
+            out.append(ws)
+    return out
+
+
+def workspace_status(ws_id):
+    """Parse `cmux list-status` into {key: value}."""
+    try:
+        out = cmux("list-status", "--workspace", ws_id, check=False)
+    except Exception:
+        return {}
+    status = {}
+    for line in out.splitlines():
+        m = re.match(r"(\w+)=(.*?)(?:\s+icon=|\s+color=|\s+priority=|$)", line)
+        if m:
+            status[m.group(1)] = m.group(2).strip()
+    return status
+
+
+def ps_table():
+    """One ps sweep: pid -> {cmd, ppid, rss}."""
+    r = subprocess.run(["ps", "-Ao", "pid=,ppid=,rss=,command="],
+                       capture_output=True, text=True)
+    table = {}
+    for line in r.stdout.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            table[int(parts[0])] = {"ppid": int(parts[1]),
+                                    "rss": int(parts[2]) * 1024,
+                                    "cmd": parts[3]}
+        except ValueError:
+            pass
+    return table
+
+
+def read_env(pids):
+    """pid -> {CMUX_WORKSPACE_ID, CMUX_SURFACE_ID}, read in one batched ps.
+
+    cmux exports these into every pane's shell, so anything launched in a pane
+    inherits them. This is an exact pid->workspace mapping, which neither cmux's
+    own process attribution (misses ~half the sessions) nor cwd matching
+    (ambiguous when several workspaces share one repo root) can provide.
+    """
+    if not pids:
+        return {}
+    out = {}
+    pid_list = list(pids)
+    for i in range(0, len(pid_list), 128):
+        chunk = ",".join(str(p) for p in pid_list[i:i + 128])
+        r = subprocess.run(["ps", "-Ewww", "-o", "pid=,command=", "-p", chunk],
+                           capture_output=True, text=True)
+        for line in r.stdout.splitlines():
+            head = line.split(None, 1)
+            if not head:
+                continue
+            try:
+                pid = int(head[0])
+            except ValueError:
+                continue
+            w = re.search(r"CMUX_WORKSPACE_ID=(\S+)", line)
+            s = re.search(r"CMUX_SURFACE_ID=(\S+)", line)
+            out[pid] = {"workspace": w.group(1) if w else None,
+                        "surface": s.group(1) if s else None}
+    return out
+
+
+def attribute(spaces):
+    """Map each workspace to the processes it owns.
+
+    Primary key is the inherited CMUX_WORKSPACE_ID (exact). Processes that lost
+    it — daemonised helpers such as agent-browser, which reparent to init —
+    fall back to longest-prefix cwd matching, so a workspace rooted at /repo
+    cannot swallow a nested worktree workspace at /repo/.claude/worktrees/x.
+    """
+    table = ps_table()
+    by_id = {w["id"]: w["ref"] for w in spaces}
+
+    interesting = {
+        pid: info for pid, info in table.items()
+        if is_claude(info["cmd"]) or kill_kind(info["cmd"])
+    }
+    envs = read_env(interesting.keys())
+
+    dirs = sorted(
+        ((w.get("current_directory") or "").rstrip("/"), w["ref"])
+        for w in spaces if w.get("current_directory")
+    )
+    dirs.sort(key=lambda t: -len(t[0]))
+
+    by_ws, unmapped = {}, []
+    for pid, info in interesting.items():
+        env = envs.get(pid, {})
+        ref = by_id.get(env.get("workspace") or "")
+        entry = {"pid": pid, "cmd": info["cmd"], "rss": info["rss"],
+                 "surface": env.get("surface") or "", "cwd": None}
+        if ref:
+            by_ws.setdefault(ref, []).append(entry)
+        else:
+            unmapped.append((pid, entry))
+
+    for pid, entry in unmapped:
+        cwd = (proc_cwd(pid) or "").rstrip("/")
+        if not cwd:
+            continue
+        entry["cwd"] = cwd
+        for d, ref in dirs:
+            if d and (cwd == d or cwd.startswith(d + "/")):
+                by_ws.setdefault(ref, []).append(entry)
+                break
+    return by_ws
+
+
+# --- Process inspection ------------------------------------------------------
+def lsof_field(pid, *extra):
+    r = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), *extra, "-Fn"],
+                       capture_output=True, text=True)
+    return [line[1:] for line in r.stdout.splitlines() if line.startswith("n")]
+
+
+def proc_cwd(pid):
+    vals = lsof_field(pid, "-d", "cwd")
+    return vals[0] if vals else None
+
+
+def proc_start_epoch(pid):
+    """Process start time, derived from ps etime ([[dd-]hh:]mm:ss)."""
+    r = subprocess.run(["ps", "-p", str(pid), "-o", "etime="],
+                       capture_output=True, text=True)
+    s = r.stdout.strip()
+    m = re.match(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$", s)
+    if not m:
+        return None
+    d, h, mi, sec = (int(x) if x else 0 for x in m.groups())
+    return time.time() - (d * 86400 + h * 3600 + mi * 60 + sec)
+
+
+def project_dir(cwd):
+    """~/.claude/projects/<cwd with / and . replaced by ->"""
+    return Path.home() / ".claude" / "projects" / re.sub(r"[/.]", "-", cwd)
+
+
+def resume_binding(ws_id, surface_id=None):
+    """cmux's own record of how to restart an agent surface.
+
+    Maintained by the cmux Claude Code hook, so it is the authoritative
+    session id — and it carries the ORIGINAL command line, which hand-building
+    `claude --resume <id>` would silently strip (losing e.g.
+    --dangerously-skip-permissions and changing how the session behaves).
+    """
+    args = ["surface", "resume", "get", "--workspace", ws_id]
+    if surface_id:
+        args += ["--surface", surface_id]
+    try:
+        data = json.loads(cmux(*args, "--json", check=True, retries=1))
+    except (RuntimeError, json.JSONDecodeError):
+        return {}
+    b = data.get("resume_binding") or {}
+    if data.get("cleared") or b.get("kind") != "claude":
+        return {}
+    return {"session_id": b.get("checkpoint_id"), "cwd": b.get("cwd"),
+            "command": b.get("command"), "source": "cmux-binding"}
+
+
+def argv_session_id(cmd):
+    """`--resume <uuid>` out of a process argv (claude's own or its wrapper)."""
+    m = re.search(r"--resume['\"\s]+([0-9a-f]{8}-[0-9a-f-]{27})", cmd)
+    return m.group(1) if m else None
+
+
+# Flags worth carrying across a park when cmux has no binding for the session.
+# Deliberately a whitelist: `ps` joins argv with spaces, so any argument that
+# itself contains spaces — notably the --settings JSON cmux passes — cannot be
+# split back correctly, and replaying a mangled one makes claude refuse to
+# start ("Invalid JSON provided to --settings"). The shim re-supplies settings
+# and hooks anyway.
+ARGV_FLAGS_BOOL = ("--dangerously-skip-permissions", "--verbose")
+ARGV_FLAGS_VALUE = ("--model", "--permission-mode")
+
+
+def command_from_argv(cmd, sid, cwd):
+    """Rebuild a resume command from a running claude's own argv.
+
+    Without this the argv fallback drops every flag the session was started
+    with — most visibly --dangerously-skip-permissions, so a resumed session
+    silently starts asking for permissions again.
+    """
+    parts = cmd.split()
+    flags = []
+    for i, tok in enumerate(parts):
+        if tok in ARGV_FLAGS_BOOL:
+            flags.append(tok)
+        elif tok in ARGV_FLAGS_VALUE and i + 1 < len(parts):
+            # Quote the VALUE too. It comes from ps, and the result is handed to
+            # `/bin/sh -c` (and typed into a pane); a process can put anything in
+            # its own argv, so an unquoted `--model ;curl$IFS...|sh` would run on
+            # the next unpark, disguised as a resume.
+            flags += [tok, shlex.quote(parts[i + 1])]
+    return (f"cd {shlex.quote(cwd)} && claude --resume {shlex.quote(sid)}"
+            + ("".join(f" {f}" for f in flags)))
+
+
+def with_shim(cmd):
+    """Run claude through cmux's wrapper shim when there is one.
+
+    Bypassing it works, but cmux stops maintaining the workspace's agent
+    binding and status pill for that session.
+
+    Only the token in COMMAND position is rewritten. Matching the first
+    `claude` anywhere rewrote the `cd` target for anyone whose checkout is at
+    `~/projects/claude`: the cd then pointed into the shim dir, `&&`
+    short-circuited, and unpark reported "resumed" for a session that never
+    started.
+    """
+    shim = os.environ.get("CMUX_CLAUDE_WRAPPER_SHIM")
+    if not shim or not os.access(shim, os.X_OK):
+        return cmd
+    return re.sub(r"(^|&&\s*|\|\|\s*|;\s*)((?:\S*/)?claude)(?=\s|$)",
+                  lambda m: f"{m.group(1)}{shlex.quote(shim)}",
+                  cmd, count=1)
+
+
+def resolve_session(pid, cmd, ws_id, surface_id, cwd):
+    """Resolve a live claude process to (session_id, transcript, command, source).
+
+    Order matters. The sibling resume-cmux-sessions skill records that a loose
+    "newest .jsonl in the worktree dir" lookup silently grabs an OLD session, so
+    it is the last resort and every earlier source is preferred.
+    """
+    argv_sid = argv_session_id(cmd)
+    for cand in (resume_binding(ws_id, surface_id),
+                 {"session_id": argv_sid, "cwd": cwd,
+                  "command": command_from_argv(cmd, argv_sid, cwd) if argv_sid
+                  else None, "source": "argv"}):
+        sid = cand.get("session_id")
+        # cmux's checkpoint_id is JSON we did not write; the scan's is a raw
+        # filename stem. Nothing that fails this gets near a shell.
+        if not sid or not SESSION_ID_RE.match(str(sid)):
+            continue
+        use_cwd = cand.get("cwd") or cwd
+        if not use_cwd:
+            continue
+        t = project_dir(use_cwd) / f"{sid}.jsonl"
+        if t.exists():
+            return sid, str(t), cand.get("command"), cand["source"], use_cwd
+
+    sid, transcript, source = session_id_of(pid, cwd)
+    if sid and SESSION_ID_RE.match(sid):
+        return sid, transcript, command_from_argv(cmd, sid, cwd), source, cwd
+    return None, None, None, None, cwd
+
+
+def session_id_of(pid, cwd=None):
+    """Resolve the session transcript for a running claude process.
+
+    Preferred: the transcript it holds open — but ONLY one living in the
+    project dir for its own cwd. A claude process keeps other projects'
+    transcripts open too, so taking the first match off lsof resumes a
+    completely unrelated session.
+
+    Claude also does not keep the fd open for the life of the process, so fall
+    back to the newest transcript in the cwd's project dir written AFTER the
+    process started — a repo root can hold hundreds of stale transcripts, and
+    only that time bound makes "newest" mean "this session".
+
+    Returns (session_id, transcript, source). The source must be reported, not
+    re-derived by the caller: both branches return a path that exists, so
+    testing the path cannot tell the safe fd hit apart from the last-resort
+    guess — and that distinction is the whole point of the ordering.
+    """
+    if not cwd:
+        return None, None, None
+    d = project_dir(cwd)
+
+    for path in lsof_field(pid):
+        m = re.search(r"/\.claude/projects/[^/]+/([0-9a-f-]{36})\.jsonl$", path)
+        if m and Path(path).parent == d:
+            return m.group(1), path, "lsof"
+
+    if not d.is_dir():
+        return None, None, None
+    started = proc_start_epoch(pid)
+    if started is None:
+        return None, None, None
+    best = None
+    for f in d.glob("*.jsonl"):
+        try:
+            mt = f.stat().st_mtime
+        except OSError:
+            continue
+        if mt >= started and (best is None or mt > best[1]):
+            best = (f, mt)
+    if not best:
+        return None, None, None
+    return best[0].stem, str(best[0]), "scan"
+
+
+def cpu_sample(pids, seconds=2.0):
+    """Peak summed %CPU across two samples — corroborates the status pill.
+
+    NOT a delta. macOS `%cpu` is already a decaying average, so subtracting two
+    samples measures acceleration: a session pinned at 100% produced deltas of
+    -4.1, +3.5, -42.1 — every one of them under the 15% threshold, so the gate
+    that exists to catch a busy session waved it through.
+    """
+    def snap():
+        r = subprocess.run(["ps", "-Ao", "pid=,%cpu="], capture_output=True,
+                           text=True)
+        d = {}
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                try:
+                    d[int(parts[0])] = float(parts[1])
+                except ValueError:
+                    pass
+        return d
+    a = snap()
+    time.sleep(seconds)
+    b = snap()
+    return max(sum(a.get(p, 0.0) for p in pids),
+               sum(b.get(p, 0.0) for p in pids))
+
+
+def runs_binary(cmd, names):
+    """Is one of `names` the program this command line actually runs?
+
+    Checks the command token and, when that is an interpreter, whatever it goes
+    on to run — so `node .bin/vite` and `node .../nuxi/bin/nuxi.mjs` count while
+    `rg webpack src/` and `vim vite.config.ts` do not. Compares basenames, so a
+    match must be the last path component rather than any directory along the
+    way, and drops one script extension so `nuxi.mjs` reads as `nuxi` while
+    `vite.config.ts` stays `vite.config`.
+    """
+    skip_next = False
+    for tok in cmd.split():
+        if skip_next:
+            skip_next = False
+            continue
+        if tok.startswith("-") and tok not in LAUNCHERS:
+            skip_next = tok in VALUE_FLAGS
+            continue
+        base = tok.rsplit("/", 1)[-1]
+        stem = re.sub(r"\.(?:mjs|cjs|js|ts)$", "", base)
+        if base in names or stem in names:
+            return True
+        if base not in LAUNCHERS:
+            return False
+    return False
+
+
+def kill_kind(cmd):
+    """'dev-server', 'test-browser' or None — what park stops but never restarts.
+
+    One definition for both readers. `attribute` runs first and gates what
+    `classify` ever sees, so a second copy of these predicates would not merely
+    disagree with this one — it would drop processes silently.
+    """
+    if runs_binary(cmd, NEVER_KILL):
+        return None  # the user's editor/pager/VCS is never a target
+    if TEST_BROWSER_RE.search(cmd) or runs_binary(cmd, BROWSER_BINARIES):
+        return "test-browser"
+    if DEV_SERVER_RE.search(cmd) or runs_binary(cmd, DEV_BINARIES):
+        return "dev-server"
+    return None
+
+
+def is_claude(cmd):
+    """A root claude session, matched on the program rather than the path.
+
+    `(^|/)claude(\\s|$)` also matched `vim /tmp/claude` and `tail -f
+    /var/log/claude` — which then got the workspace's real cmux binding, were
+    recorded as sessions, and were killed along with their descendants while
+    park reported the workspace parked.
+    """
+    return runs_binary(cmd, CLAUDE_BINARIES)
+
+
+def classify(procs, table=None):
+    """Split a workspace's processes into claude / dev servers / test browsers.
+
+    Only ROOT claude processes are returned: a session spawns subagent claudes
+    as children, and killing the root takes the whole tree with it. Reading a
+    session id off a subagent would park the wrong transcript.
+    """
+    table = table or ps_table()
+    claude_all, dev, browser = [], [], []
+    for p in procs:
+        cmd = p.get("cmd") or ""
+        if is_claude(cmd):
+            claude_all.append(p)
+            continue
+        kind = kill_kind(cmd)
+        if kind == "test-browser":
+            browser.append(p)
+        elif kind == "dev-server":
+            dev.append(p)
+
+    claude_pids = {p["pid"] for p in claude_all}
+
+    def has_claude_ancestor(pid):
+        seen, cur = set(), table.get(pid, {}).get("ppid")
+        while cur and cur > 1 and cur not in seen:
+            seen.add(cur)
+            if cur in claude_pids:
+                return True
+            cur = table.get(cur, {}).get("ppid")
+        return False
+
+    claude = [p for p in claude_all if not has_claude_ancestor(p["pid"])]
+    return claude, dev, browser
+
+
+def kill_tree(pid, sig=15):
+    """SIGTERM a pid and its descendants, children first.
+
+    Reads ps fresh rather than taking a caller's snapshot: a session spawns
+    subagents continuously, and a stale map leaves them running.
+    """
+    children = {}
+    for child, info in ps_table().items():
+        children.setdefault(info["ppid"], []).append(child)
+    order, stack = [], [pid]
+    while stack:
+        cur = stack.pop()
+        order.append(cur)
+        stack.extend(children.get(cur, []))
+    killed = []
+    for p in reversed(order):
+        try:
+            os.kill(p, sig)
+            killed.append(p)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return killed
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+# --- Ledger ------------------------------------------------------------------
+def ensure_ledger_dir():
+    """Create the ledger dir 0700, and tighten it if it already exists.
+
+    `mkdir(mode=0o700, exist_ok=True)` does NOT chmod an existing directory, so
+    a ledger created by an earlier version stays world-readable — and its
+    entries record cwds, branches and the user's last prompt.
+    """
+    LEDGER.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if stat.S_IMODE(LEDGER.stat().st_mode) & 0o077:
+        LEDGER.chmod(0o700)
+
+
+def ledger_path(ws_id):
+    """Path for a workspace's entry, refusing anything that escapes the ledger.
+
+    The id normally comes from cmux, but `rebuild`, `forget` and `unpark` also
+    take it from the ledger file's own contents — and `LEDGER / f"{ws_id}.json"`
+    happily resolves "../settings" or an absolute path, at which point unlink()
+    deletes a file outside the ledger entirely.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", str(ws_id or "")):
+        die(f"refusing to use {ws_id!r} as a ledger key")
+    return LEDGER / f"{ws_id}.json"
+
+
+def read_entry(path):
+    """Load one ledger entry, normalised so consumers can index it freely.
+
+    Returns None if the file is unreadable — callers that report on the
+    ledger (doctor) must surface that rather than treat it as absent.
+    """
+    try:
+        e = json.loads(path.read_text())
+    except (ValueError, OSError):
+        return None
+    if not isinstance(e, dict):
+        return None
+    e.setdefault("sessions", [])
+    e.setdefault("killed", [])
+    e.setdefault("git", {})
+    e["title"] = e.get("title") or (Path(e["cwd"]).name if e.get("cwd") else "")
+    return e
+
+
+def read_ledger(with_broken=False):
+    """Every parked entry.
+
+    `with_broken` also yields a {"__broken__": path} marker for files that will
+    not parse, which doctor needs — silently dropping them made it report a
+    truncated entry as no entry at all, while park still said "already parked".
+    """
+    ensure_ledger_dir()
+    out = []
+    for f in sorted(LEDGER.glob("*.json")):
+        e = read_entry(f)
+        if e is not None:
+            out.append(e)
+        elif with_broken:
+            out.append({"__broken__": str(f)})
+    return out
+
+
+def write_entry(path, entry, claim=False):
+    """Write a ledger entry atomically.
+
+    `claim=True` fails if the entry already exists, which is what makes the
+    "already parked" guard safe: the check and the write used to straddle a 2s
+    CPU sample, so two concurrent parks both passed it and both pre-filled the
+    prompt.
+    """
+    ensure_ledger_dir()
+    blob = json.dumps(entry, indent=2)
+    if claim:
+        # O_EXCL on the FINAL path would leave a half-written .json if this is
+        # interrupted; claim a lock file instead and rename the finished blob in.
+        lock = path.with_suffix(".json.lock")
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return False
+        if path.exists():
+            os.close(fd)
+            lock.unlink(missing_ok=True)
+            return False
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(blob)
+            os.replace(str(lock), str(path))
+        except BaseException:
+            lock.unlink(missing_ok=True)
+            raise
+        return True
+    # Same 0600 as the claim path: an entry records the cwd, the branch and the
+    # user's last prompt, and write_text would leave it umask-derived (0644).
+    tmp = path.with_suffix(".json.tmp")
+    fd = os.open(str(tmp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(blob)
+    os.replace(str(tmp), str(path))
+    return True
+
+
+def git_info(cwd):
+    """Branch + dirty count in ONE git call.
+
+    Both the listing and the ledger need exactly these two, and five
+    `git rev-parse` calls per workspace cost 4.4s across 45 workspaces. The
+    git-dir side of the checkout is `worktree_fingerprint`'s job.
+    """
+    if not cwd or not Path(cwd).exists():
+        return {}
+    r = subprocess.run(["git", "-C", cwd, "status", "--porcelain=v1", "-b",
+                        "--no-renames"], capture_output=True, text=True)
+    if r.returncode != 0:
+        return {}
+    lines = r.stdout.splitlines()
+    branch = None
+    if lines and lines[0].startswith("## "):
+        branch = lines[0][3:].split("...")[0].strip()
+        if branch.startswith("No commits yet on "):
+            branch = branch[len("No commits yet on "):]
+        lines = lines[1:]
+    return {"branch": branch, "dirty_files": len(lines)}
+
+
+# --- Resolve targets ---------------------------------------------------------
+def resolve_targets(args):
+    """Accept workspace refs/UUIDs/titles, `window:N`, or `.`."""
+    spaces = all_workspaces()
+    by_ref = {w["ref"]: w for w in spaces}
+    by_id = {w["id"]: w for w in spaces}
+    out, seen = [], set()
+
+    def add(w):
+        if w["id"] not in seen:
+            seen.add(w["id"])
+            out.append(w)
+
+    for a in args:
+        if a == ".":
+            # `selected` is per WINDOW, so falling back to it would resolve `.`
+            # to one workspace in every window — `park park .` from a plain
+            # Terminal would kill a session in each of them. There is no
+            # sensible current workspace outside a cmux pane; say so instead.
+            cur = os.environ.get("CMUX_WORKSPACE_ID")
+            if not cur:
+                die("`.` means the workspace you are in, and this shell is not "
+                    "in a cmux pane — name a target explicitly")
+            if cur not in by_id:
+                die(f"`.` resolved to {cur}, which cmux does not list — "
+                    "name a target explicitly")
+            add(by_id[cur])
+            continue
+        m = re.match(r"^window:(\d+)$", a)
+        if m:
+            hit = [w for w in spaces if w.get("window_ref") == a]
+            if not hit:  # fall back to the 0-based list-windows index
+                hit = [w for w in spaces if w["window_index"] == int(m.group(1))]
+            if not hit:
+                die(f"no window matches '{a}'")
+            for w in hit:
+                add(w)
+            continue
+        if a in by_ref:
+            add(by_ref[a])
+            continue
+        if a in by_id:
+            add(by_id[a])
+            continue
+        matches = [w for w in spaces if a.lower() in (w["title"] or "").lower()]
+        if len(matches) == 1:
+            add(matches[0])
+        elif len(matches) > 1:
+            die(f"'{a}' matches {len(matches)} workspaces: "
+                + ", ".join(f"{w['ref']} {w['title'][:30]}" for w in matches))
+        else:
+            orphan = orphan_target(a, by_id)
+            if orphan:
+                add(orphan)
+                continue
+            die(f"no workspace matches '{a}'")
+    return out
+
+
+def targets_from(argv, msg="no target"):
+    """Positional args -> workspaces. Every command takes targets this way.
+
+    resolve_targets dies on an arg it cannot match, so an empty result can only
+    mean the command was given no target at all.
+    """
+    targets = resolve_targets([a for a in argv if not a.startswith("--")])
+    if not targets:
+        die(msg)
+    return targets
+
+
+def orphan_target(a, live_by_id):
+    """A parked entry whose cmux workspace is gone, matched by uuid or title.
+
+    Without this the ledger's whole selling point leaks: once cmux loses a
+    workspace, its entry can no longer be named, so `show`, `forget` and
+    `unpark` all answer "no workspace matches" and the entry is unremovable
+    except by hand — while `doctor` flags it forever.
+    """
+    hits = []
+    for e in read_ledger():
+        ws_id = e.get("workspace_id")
+        if not ws_id or ws_id in live_by_id:
+            continue
+        title = e.get("title") or ""
+        if a in (ws_id, e.get("workspace_ref")) or a.lower() in title.lower():
+            hits.append({"id": ws_id, "ref": e.get("workspace_ref") or ws_id,
+                         "title": title, "window_id": e.get("window_id"),
+                         "orphan": True})
+    # The live path dies on an ambiguous title; taking the first match here
+    # would let `park forget api` drop whichever of api-main/api-worker sorted
+    # first, with no way to tell which one went.
+    if len(hits) > 1:
+        die(f"'{a}' matches {len(hits)} parked entries whose workspace is gone: "
+            + ", ".join(f"{h['id'][:8]} {h['title'][:30]}" for h in hits))
+    return hits[0] if hits else None
+
+
+def die(msg):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def mb(n):
+    return n / 1024 / 1024
+
+
+def human(n):
+    return f"{mb(n) / 1024:.1f} GB" if mb(n) >= 1024 else f"{mb(n):.0f} MB"
+
+
+# --- Commands ----------------------------------------------------------------
+def bar(value, peak, width=10, plain=False):
+    """Tiny RAM bar, so the heavy workspaces are findable at a glance.
+
+    `plain` uses ASCII: inside curses the multibyte block/dot pair renders as
+    U+FFFD from a certain byte length onwards, so the picker asks for ASCII.
+    """
+    if peak <= 0:
+        return " " * width
+    filled = max(1, round(width * value / peak)) if value > 0 else 0
+    full, empty = ("=", "-") if plain else ("█", "·")
+    return full * filled + empty * (width - filled)
+
+
+def group_by_window(rows):
+    """[(window label, rows)] — windows in order, heaviest live first.
+
+    Both the listing and the picker show the same grouping; keeping one
+    ordering means they cannot drift into disagreeing about what is where.
+    """
+    windows = {}
+    for r in rows:
+        windows.setdefault(r["window_ref"] or f"window?{r['window_index']}",
+                           []).append(r)
+    return [(win, sorted(windows[win], key=lambda r: (r["parked"], -r["bytes"])))
+            for win in sorted(windows, key=lambda k: windows[k][0]["window_index"])]
+
+
+def flags_of(r):
+    """`2d 1b ~3` — dev servers, test browsers, dirty files. Empty when none."""
+    parts = []
+    if r["dev"]:
+        parts.append(f"{r['dev']}d")
+    if r["browser"]:
+        parts.append(f"{r['browser']}b")
+    if r["dirty"]:
+        parts.append(f"~{r['dirty']}")
+    return " ".join(parts)
+
+
+def collect(spaces=None):
+    """One pass over every workspace -> rows ready for display or JSON."""
+    spaces = spaces if spaces is not None else all_workspaces()
+    parked = {p["workspace_id"]: p for p in read_ledger()}
+    by_ws = attribute(spaces)
+    table = ps_table()
+
+    # Narrow to rows we will actually show BEFORE the expensive per-workspace
+    # lookups: status is a ~256 ms cmux round-trip and git is a subprocess.
+    keep = []
+    for w in spaces:
+        procs = by_ws.get(w["ref"], [])
+        claude, dev, browser = classify(procs, table) if procs else ([], [], [])
+        # Normalised to {} so the ledger-or-live fallbacks below can just be
+        # `entry.get(x) or w.get(y)`. read_entry never yields an empty dict, so
+        # this stays a faithful "is it parked" truth value.
+        entry = parked.get(w["id"]) or {}
+        if entry or claude:
+            keep.append((w, procs, claude, dev, browser, entry))
+
+    # Status and git are independent, so overlap the two fan-outs as well.
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_state = ex.submit(
+            pmap, lambda kw: workspace_status(kw[0]["id"]).get("claude_code", ""),
+            keep)
+        f_git = ex.submit(
+            pmap, lambda kw: kw[5].get("git")
+            or git_info(kw[0].get("current_directory")) or {}, keep)
+        states, gits = f_state.result(), f_git.result()
+
+    rows = []
+    for (w, procs, claude, dev, browser, entry), state, g in zip(
+            keep, states, gits):
+        last = (w.get("latest_submitted_message") or "").strip().replace("\n", " ")
+        rows.append({
+            "ref": w["ref"], "id": w["id"],
+            # cmux falls back to showing the directory once the agent is gone,
+            # so a parked row keeps the title captured while it was alive.
+            "title": entry.get("title") or w["title"] or "",
+            "window_ref": w.get("window_ref", ""),
+            "window_id": w.get("window_id", ""),
+            "window_index": w["window_index"],
+            "parked": bool(entry),
+            "bytes": (entry.get("freed_bytes", 0) if entry
+                      else sum(p["rss"] for p in procs)),
+            "state": state or "-",
+            "busy": state.lower() in BUSY_STATES,
+            "dev": len(dev), "browser": len(browser),
+            "branch": g.get("branch"), "dirty": g.get("dirty_files") or 0,
+            "note": entry.get("note") or last,
+            "since": entry.get("parked_at") or w.get("latest_submitted_at"),
+            "cwd": entry.get("cwd") or w.get("current_directory"),
+        })
+    return rows
+
+
+def cmd_ls(argv):
+    with Spinner("scanning workspaces…"):
+        rows = collect()
+    if "--json" in argv:
+        print(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        print("  nothing to show\n")
+        return
+
+    peak = max((r["bytes"] for r in rows), default=1)
+
+    tot_parked = sum(r["bytes"] for r in rows if r["parked"])
+    tot_live = sum(r["bytes"] for r in rows if not r["parked"])
+    tot_free = sum(r["bytes"] for r in rows if not r["parked"] and not r["busy"])
+
+    for win, group in group_by_window(rows):
+        live = sum(r["bytes"] for r in group if not r["parked"])
+        freeable = sum(r["bytes"] for r in group
+                       if not r["parked"] and not r["busy"])
+        print(f"\n  {win}        {len(group):>2} ws"
+              f"      {human(live):>9} live"
+              f"    {human(freeable):>9} parkable")
+        print(f"  {'─' * 84}")
+        for r in group:
+            if r["parked"]:
+                mark, tail = "❄", "parked " + ago(r["since"])
+            elif r["busy"]:
+                mark, tail = "●", r["state"]
+            else:
+                mark, tail = "○", r["state"]
+            extra = flags_of(r)
+            flags = f"[{extra}]" if extra else ""
+            print(f"  {mark} {r['ref']:<13} {r['title'][:34]:<35}"
+                  f" {bar(r['bytes'], peak)} {human(r['bytes']):>8}"
+                  f"  {tail:<14}{flags}")
+
+    print(f"\n  {'═' * 84}")
+    print(f"  {human(tot_live)} live · {human(tot_parked)} parked · "
+          f"{human(tot_free)} parkable right now")
+    print("  ❄ parked   ● turn in flight (never parked)   ○ parkable"
+          "   [Nd dev · Nb browser · ~N dirty]\n")
+
+
+def ago(iso):
+    """Humanise a timestamp from either source.
+
+    `since` is our own parked_at (`+00:00`) for a parked row but cmux's
+    `latest_submitted_at` (`...Z`) for a live one, and Python 3.9's
+    fromisoformat rejects the Z form outright.
+    """
+    if not isinstance(iso, str) or not iso:
+        return "?"
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return "?"
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    d = datetime.now(timezone.utc) - t
+    if d.days:
+        return f"{d.days}d ago"
+    h = d.seconds // 3600
+    return f"{h}h ago" if h else f"{d.seconds // 60}m ago"
+
+
+def worktree_fingerprint(cwd):
+    """What must still be true about the checkout after parking.
+
+    Parking only kills processes, but this is the failure the user was burned
+    by before, so it is asserted rather than assumed.
+    """
+    if not cwd or not Path(cwd).is_dir():
+        return None
+    r = subprocess.run(["git", "-C", cwd, "rev-parse", "--git-dir",
+                        "--git-common-dir"], capture_output=True, text=True)
+    if r.returncode != 0:
+        return {"exists": True, "git": False}
+    parts = r.stdout.split()
+    return {"exists": True, "git": True, "git_dir": parts[0] if parts else None,
+            "common_dir": parts[1] if len(parts) > 1 else None}
+
+
+def resume_command_for(session):
+    """The command that brings one agent tab back, shim included.
+
+    with_shim belongs here rather than at the call sites: the `cmux send` path
+    used to skip it, so every tab resumed that way lost cmux's agent binding
+    and status pill. One application point keeps both delivery paths honest.
+    """
+    return with_shim(session.get("resume_command") or (
+        f"cd {shlex.quote(session['cwd'])} && "
+        f"claude --resume {shlex.quote(session['session_id'])}"))
+
+
+def pid_matches(p):
+    """Is this pid still the process we measured, or a recycled one?
+
+    Re-reads ps for the single pid rather than trusting the batch snapshot.
+    Without this, kill_tree can SIGTERM an unrelated process and its whole
+    descendant tree after macOS reuses a pid.
+    """
+    r = subprocess.run(["ps", "-o", "command=", "-p", str(p["pid"])],
+                       capture_output=True, text=True, check=False)
+    return r.returncode == 0 and r.stdout.strip() == p["cmd"].strip()
+
+
+def transcript_age(path):
+    """Seconds since the transcript was last appended to; inf if unknown."""
+    try:
+        return max(0.0, time.time() - Path(path).stat().st_mtime)
+    except OSError:
+        return float("inf")
+
+
+def park_one(w, by_ws, table, dry=False, force=False):
+    """Park one workspace. Returns a result dict; prints nothing.
+
+    Silence matters: the picker calls this from a worker thread while curses
+    owns the screen.
+    """
+    ref, title = w["ref"], (w["title"] or "")
+    res = {"ref": ref, "title": title, "ok": False, "freed": 0, "notes": []}
+
+    if ledger_path(w["id"]).exists():
+        res["msg"] = "already parked"
+        return res
+    procs = by_ws.get(ref, [])
+    claude, dev, browser = classify(procs, table)
+    if not claude:
+        res["msg"] = "no claude session"
+        return res
+
+    state = workspace_status(w["id"]).get("claude_code", "")
+    if state.lower() in BUSY_STATES and not force:
+        res["msg"] = f"turn in flight ({state})"
+        return res
+    if cpu_sample([p["pid"] for p in claude]) > 15.0 and not force:
+        res["msg"] = "busy (cpu)"
+        return res
+
+    sessions = []
+    for p in claude:
+        cwd = p.get("cwd") or proc_cwd(p["pid"])
+        sid, transcript, command, source, cwd = resolve_session(
+            p["pid"], p["cmd"], w["id"], p.get("surface"), cwd)
+        if not sid or not cwd:
+            res["msg"] = f"cannot resolve session id/cwd for pid {p['pid']}"
+            return res
+        if source == "scan":
+            res["notes"].append("session id came from a transcript scan, "
+                                "not cmux's binding — verify after unpark")
+        sessions.append({"session_id": sid, "transcript": transcript,
+                         "cwd": cwd, "resume_command": command,
+                         "id_source": source, "surface": p["surface"]})
+
+    # A third of workspaces carry no claude_code pill at all, and a session
+    # blocked on a slow tool call sits near 0% CPU — so for those two gates
+    # agree it is idle while a turn is in flight. The transcript is the ground
+    # truth: an active turn appends to it continuously.
+    if not state and not force and any(transcript_age(s["transcript"]) < 20
+                                       for s in sessions):
+        res["msg"] = "recent transcript activity (no status pill)"
+        return res
+
+    cwd = sessions[0]["cwd"]
+    freed = sum(p["rss"] for p in procs)
+    res["freed"] = freed
+    if dry:
+        res["ok"] = True
+        res["msg"] = (f"would park ({len(claude)} claude, {len(dev)} dev, "
+                      f"{len(browser)} browser)")
+        return res
+
+    before = worktree_fingerprint(cwd)
+    note = (w.get("latest_submitted_message") or "").strip().replace("\n", " ")
+    entry = {
+        "workspace_id": w["id"], "workspace_ref": ref,
+        "window_id": w["window_id"],
+        "title": w["title"], "cwd": cwd, "sessions": sessions,
+        "git": git_info(cwd),
+        "worktree": before,
+        # Kept whole and human-readable: unpark only says HOW MANY dev/browser
+        # processes it will not restart, and `park show` is where you look up
+        # which ones they were.
+        "killed": [{"pid": p["pid"], "cmd": p["cmd"][:200], "rss": p["rss"],
+                    "kind": k}
+                   for k, group in (("dev-server", dev), ("test-browser", browser))
+                   for p in group],
+        "freed_bytes": freed,
+        "parked_at": datetime.now(timezone.utc).isoformat(),
+        "note": note[:300], "prev_color": w.get("custom_color"),
+    }
+
+    # The topology drifts: a session can start a turn between the busy gate
+    # above and this kill. Re-check immediately before mutating.
+    if not force:
+        again = workspace_status(w["id"]).get("claude_code", "")
+        if again.lower() in BUSY_STATES:
+            res["msg"] = f"became busy ({again})"
+            return res
+        # Re-run the SAME pair of gates, not just the pill: for a workspace with
+        # no pill the line above is always "" and the re-check was a no-op.
+        if not again and any(transcript_age(s["transcript"]) < 20
+                             for s in sessions):
+            res["msg"] = "became busy (transcript)"
+            return res
+
+    # Claiming the ledger file atomically IS the "already parked" guard: the
+    # check at the top of this function is minutes-old by now.
+    if not write_entry(ledger_path(w["id"]), entry, claim=True):
+        res["msg"] = "already parked"
+        return res
+
+    # The pid table was sampled before a 2s CPU window and, from cmd_park, once
+    # for every target in the batch — so by now a pid may have exited and been
+    # reused. kill_tree takes out a whole descendant tree; confirm each pid is
+    # still the process we measured before signalling it.
+    doomed = browser + dev + claude
+    try:
+        victims = [p for p in doomed if pid_matches(p)]
+    except BaseException:
+        # Ctrl-C between the claim and the kill would otherwise leave a complete
+        # ledger entry with the session still alive — which `doctor` calls
+        # restorable and `unpark` answers by starting a SECOND process on that
+        # transcript.
+        ledger_path(w["id"]).unlink(missing_ok=True)
+        raise
+    stale = len(doomed) - len(victims)
+    if stale:
+        res["notes"].append(f"{stale} process(es) vanished before the kill")
+    for p in victims:
+        kill_tree(p["pid"])
+    time.sleep(1.5)
+    survivors = [p for p in victims if alive(p["pid"])]
+    for p in survivors:                     # escalate rather than report a lie
+        kill_tree(p["pid"], sig=signal.SIGKILL)
+    if survivors:
+        time.sleep(0.5)
+    stubborn = [p for p in survivors if alive(p["pid"])]
+    if stubborn:
+        # Roll back: the ledger would claim parked while the session is alive,
+        # and `unpark` would then start a second process on that transcript.
+        ledger_path(w["id"]).unlink(missing_ok=True)
+        res["msg"] = (f"{len(stubborn)} process(es) survived TERM and KILL — "
+                      "left running, nothing recorded")
+        return res
+
+    after = worktree_fingerprint(cwd)
+    if before and after != before:
+        res["notes"].append(f"WORKTREE CHANGED during park: {before} -> {after}")
+
+    # Leave a command typed (not run) at every agent tab's prompt, so the
+    # workspace comes back by walking into any of them and pressing enter.
+    # `park unpark .` rather than the raw resume line: cmux's recorded command
+    # is an unreadable escaped one-liner, and this way enter also clears the
+    # pill and the ledger. One workspace parks and resumes as a unit, so it does
+    # not matter which tab you land on.
+    for s in sessions:
+        send_text("park unpark .", w["id"], s.get("surface"))
+
+    cmux_do("set-status", PILL_KEY, f"Parked · {human(freed)} freed",
+            "--icon", "snowflake", "--color", "#5AC8FA", "--priority", "90",
+            "--workspace", w["id"])
+    cmux_do("workspace-action", "--action", "set-color", "--color",
+            PARKED_COLOR, "--workspace", w["id"])
+    if pin_title(w, title):
+        # Recorded so unpark clears only a name we set, never the user's own.
+        entry["pinned_title"] = True
+        write_entry(ledger_path(w["id"]), entry)
+
+    res["ok"] = True
+    res["msg"] = f"{human(freed)} freed"
+    return res
+
+
+def restore_visual_state(ws_id, entry):
+    """Undo the pill, the dimmed colour and the pinned title park applied.
+
+    Shared with `forget`, which used to clear the colour outright — destroying
+    the original in the same breath as the ledger entry holding the only record
+    of it.
+    """
+    cmux_do("clear-status", PILL_KEY, "--workspace", ws_id)
+    prev = entry.get("prev_color")
+    if prev:
+        cmux_do("workspace-action", "--action", "set-color",
+                "--color", prev, "--workspace", ws_id)
+    else:
+        cmux_do("workspace-action", "--action", "clear-color",
+                "--workspace", ws_id)
+    # Only undo a rename we made ourselves; a name the user set is theirs.
+    if entry.get("pinned_title"):
+        cmux_do("workspace-action", "--action", "clear-name",
+                "--workspace", ws_id)
+
+
+def pin_title(w, title):
+    """Freeze the workspace's name while it is parked.
+
+    cmux derives the sidebar title from the live agent, so killing the session
+    makes a workspace called "✳ Vyhledejte trendy…" decay to "~/Sites/foo" —
+    and the titles are exactly how the user finds their way around 40 open
+    workspaces. Pinning it as a custom name keeps the sidebar readable.
+
+    Returns whether it pinned, so unpark only clears a name park itself set.
+    """
+    if not title or w.get("has_custom_title"):
+        return False
+    return cmux_do("workspace-action", "--action", "rename",
+                   "--title", title, "--workspace", w["id"])
+
+
+def clear_prefill(ws_id, sessions):
+    """Wipe the `park unpark .` park left typed at each agent tab's prompt.
+
+    Without this, `forget` leaves a command that will only ever answer
+    "not parked" sitting under the user's cursor.
+    """
+    for s in sessions:
+        keys = ["send-key", "--workspace", ws_id]
+        if s.get("surface"):
+            keys += ["--surface", s["surface"]]
+        cmux_do(*keys, "ctrl+u")
+
+
+def unpark_one(w, allow_exec=False):
+    """Resume one parked workspace. Returns a result dict; prints nothing.
+
+    `allow_exec` is for `park unpark .` run inside the very workspace being
+    resumed: sending keystrokes to your own surface races the shell, so the
+    process replaces itself with the resume command instead.
+    """
+    ref = w["ref"]
+    res = {"ref": ref, "title": w.get("title") or "", "ok": False, "notes": []}
+    path = ledger_path(w["id"])
+    if not path.exists():
+        res["msg"] = "not parked"
+        return res
+    e = read_entry(path)
+    if e is None:
+        res["msg"] = f"ledger entry is unreadable: {path}"
+        return res
+    res["title"] = e.get("title") or res["title"]
+    if w.get("orphan"):
+        # Nothing to send keystrokes to. `park rebuild` recreates the workspace
+        # and re-keys this entry onto it; only then can it be resumed.
+        res["msg"] = "workspace is gone from cmux — run `park rebuild` first"
+        return res
+
+    problems = []
+    if not e.get("cwd") or not Path(e["cwd"]).exists():
+        problems.append(f"cwd is gone: {e.get('cwd')}")
+    for s in e["sessions"]:
+        # Per-tab cwds genuinely diverge (a tab can sit in a worktree under the
+        # workspace root), so the workspace-level check above is not enough —
+        # the resume command cds into this one.
+        if not s.get("cwd") or not Path(s["cwd"]).exists():
+            problems.append(f"session cwd is gone: {s.get('cwd')}")
+        if not s.get("transcript") or not Path(s["transcript"]).exists():
+            problems.append(f"transcript is gone: {s.get('transcript')}")
+    if problems:
+        res["msg"] = "; ".join(problems) + f" (ledger kept at {path})"
+        return res
+
+    bare = [s for s in e["sessions"] if not s.get("resume_command")]
+    if bare:
+        res["notes"].append(
+            f"{len(bare)} tab(s) have no recorded command and resume with "
+            "defaults — check for `bypass permissions` after they start")
+
+    old, now = e.get("git", {}), git_info(e["cwd"])
+    if old.get("branch") and now.get("branch") != old.get("branch"):
+        res["notes"].append(
+            f"branch changed: {old['branch']} -> {now.get('branch')}")
+
+    # Never resume a conversation that is already live: two processes
+    # appending to one transcript corrupts it.
+    running = {argv_session_id(i["cmd"]) for i in ps_table().values()}
+    dupes = [s["session_id"] for s in e["sessions"] if s["session_id"] in running]
+    if dupes:
+        # The session is back, so the workspace is not parked any more —
+        # whatever resumed it, the ledger and the sidebar are now lying. Skip
+        # the resume (a second process on one transcript corrupts it) but do
+        # the rest of the teardown, or the pill, the colour and the pinned
+        # title stick around forever and every later unpark refuses too.
+        clear_prefill(w["id"], e["sessions"])
+        restore_visual_state(w["id"], e)
+        path.unlink()
+        res["ok"] = True
+        res["msg"] = f"already running ({dupes[0][:8]}) — cleared parked state"
+        return res
+
+    # A workspace can hold several agent tabs; each is resumed into its own
+    # surface. The tab this command is running in cannot be driven by sending
+    # keystrokes to itself, so it is handed over with exec at the very end.
+    here = None
+    sent = 0
+    for s in e["sessions"]:
+        surface = s.get("surface", "")
+        if allow_exec and surface and os.environ.get("CMUX_SURFACE_ID") == surface:
+            here = s
+            continue
+        # After a rebuild the surfaces are gone and every session shares the
+        # workspace's single one, so only the first can actually be resumed.
+        # Say what the others need rather than dropping them on the floor.
+        if not surface and sent:
+            res["notes"].append(
+                f"tab {sent + 1} needs a new agent tab; resume it with: "
+                + resume_command_for(s))
+            continue
+        # Park pre-filled a command at this prompt; clear the line first or
+        # the replay concatenates onto it.
+        clear_prefill(w["id"], [s])
+        if not send_text(resume_command_for(s), w["id"], surface, submit=True):
+            res["msg"] = (f"cmux would not accept the resume command"
+                          + (f" for {surface}" if surface else "")
+                          + f" (ledger kept at {path})")
+            return res
+        sent += 1
+
+    restore_visual_state(w["id"], e)
+    path.unlink()
+
+    killed = e.get("killed", [])
+    if killed:
+        res["notes"].append(f"{len(killed)} dev/browser process(es) were "
+                            f"stopped and are NOT restarted")
+    res["ok"] = True
+    res["msg"] = "resumed"
+
+    if here:
+        # Everything above is durable; hand this terminal straight to claude.
+        # resume_command_for already applied the shim.
+        cmd = resume_command_for(here)
+        sys.stdout.flush()
+        os.execvp("/bin/sh", ["/bin/sh", "-c", cmd])
+    return res
+
+
+def cmd_park(argv):
+    dry = "--dry-run" in argv
+    force = "--force" in argv
+    targets = targets_from(
+        argv, "no target — pass a workspace ref, a title, `window:N`, or `.`")
+
+    with Spinner("checking what is safe to park…"):
+        by_ws = attribute(all_workspaces())
+        table = ps_table()
+
+    total, done = 0, 0
+    for w in targets:
+        r = park_one(w, by_ws, table, dry=dry, force=force)
+        mark = ("would park" if dry else "❄") if r["ok"] else "skip"
+        print(f"  {mark:<11} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
+        for n in r["notes"]:
+            print(f"              {n}")
+        if r["ok"]:
+            total += r["freed"]
+            done += 1
+    verb = "would free" if dry else "freed"
+    print(f"\n  {done} workspace(s), {verb} {human(total)}\n")
+
+
+def cmd_unpark(argv):
+    targets = targets_from(argv)
+    for w in targets:
+        r = unpark_one(w, allow_exec=len(targets) == 1)
+        mark = "▶" if r["ok"] else "skip"
+        print(f"  {mark:<5} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
+        for n in r["notes"]:
+            print(f"        {n}")
+    print()
+
+
+def cmd_show(argv):
+    for w in targets_from(argv):
+        path = ledger_path(w["id"])
+        if not path.exists():
+            print(f"{w['ref']} is not parked")
+            continue
+        print(path.read_text())
+
+
+def cmd_forget(argv):
+    """Drop a ledger entry without resuming — for entries that went stale.
+
+    Differs from unpark only in not sending the resume commands: the pill, the
+    colour and the pre-filled prompt are torn down exactly the same way.
+    """
+    for w in targets_from(argv):
+        path = ledger_path(w["id"])
+        if not path.exists():
+            print(f"  skip  {w['ref']}  — not parked")
+            continue
+        e = read_entry(path) or {}
+        clear_prefill(w["id"], e.get("sessions", []))
+        restore_visual_state(w["id"], e)
+        path.unlink()
+        print(f"  forgot  {w['ref']}  {(w['title'] or '')[:40]}")
+    print()
+
+
+def cmd_doctor(argv):
+    """Verify every ledger entry is still restorable."""
+    entries = read_ledger(with_broken=True)
+    if not entries:
+        print("  no parked workspaces")
+        return
+    spaces = {w["id"]: w for w in all_workspaces()}
+    running = {argv_session_id(i["cmd"]) for i in ps_table().values()}
+    bad = 0
+    for e in entries:
+        if e.get("__broken__"):
+            bad += 1
+            print(f"  ✗ {'-':<13} {Path(e['__broken__']).name[:38]:<40}"
+                  " ledger file is corrupt (remove it by hand)")
+            continue
+        issues = []
+        if not e.get("cwd") or not Path(e["cwd"]).exists():
+            issues.append("cwd missing")
+        for s in e["sessions"]:
+            if not s.get("cwd") or not Path(s["cwd"]).exists():
+                issues.append("session cwd missing")
+            if not s.get("transcript") or not Path(s["transcript"]).exists():
+                issues.append("transcript missing")
+            if s.get("session_id") in running:
+                issues.append("stale entry: session is already running "
+                              "(clear with: park forget)")
+            if s.get("id_source") == "scan":
+                issues.append("session id came from a transcript scan — "
+                              "verify the conversation after unpark")
+        # The risk park guards against materialises WHILE parked, over days,
+        # not during the 1.5s kill window park_one compares across.
+        if e.get("worktree") and worktree_fingerprint(e.get("cwd")) != e["worktree"]:
+            issues.append("git checkout changed since parking")
+        live = spaces.get(e.get("workspace_id"))
+        if not live:
+            issues.append("workspace no longer open in cmux "
+                          "(restore with: park rebuild)")
+        # Refs are positional and shift as workspaces open and close, so the one
+        # captured at park time may now name a different workspace.
+        ref = live["ref"] if live else (e.get("workspace_id") or "?")[:13]
+        mark = "✗" if issues else "✓"
+        if issues:
+            bad += 1
+        print(f"  {mark} {ref:<13} {e['title'][:38]:<40}"
+              f" {', '.join(issues) or 'ok'}")
+    print(f"\n  {len(entries) - bad}/{len(entries)} restorable\n")
+
+
+def cmd_rebuild(argv):
+    """Recreate cmux workspaces for ledger entries whose workspace is gone.
+
+    This is the reason the ledger lives outside cmux: if cmux loses its state,
+    every parked workspace can still be reconstructed from here.
+    """
+    dry = "--dry-run" in argv
+    before = {w["id"] for w in all_workspaces()}
+    lost = [e for e in read_ledger() if e.get("workspace_id") not in before]
+    if not lost:
+        print("  nothing to rebuild — every parked workspace is still open\n")
+        return
+    for e in lost:
+        title = e["title"]
+        if not e.get("cwd") or not Path(e["cwd"]).exists():
+            print(f"  skip  {title[:40]} — cwd gone")
+            continue
+        if dry:
+            print(f"  would rebuild  {title[:44]}  ({e['cwd']})")
+            continue
+
+        old_id = e["workspace_id"]
+        args = ["new-workspace", "--name", title, "--cwd", e["cwd"],
+                "--focus", "false"]
+        # Window uuids are regenerated by the same cmux reset that lost the
+        # workspace, so a stale --window fails the whole call. Fall back to the
+        # caller's window rather than printing a success that did not happen.
+        # One attempt only: `A or B` on a CREATE can make two workspaces, and
+        # then neither can be identified as "the new one".
+        if e.get("window_id"):
+            args += ["--window", e["window_id"]]
+        ok = cmux_do(*args)
+        if not ok:
+            print(f"  FAILED  {title[:44]} — cmux would not create it")
+            continue
+
+        # new-workspace prints no id, so find the workspace it just made and
+        # move the entry onto that uuid. Without this the ledger stays keyed to
+        # the dead workspace and `park unpark` can never find it again — which
+        # would make the recovery path the out-of-cmux ledger exists for a
+        # dead end.
+        fresh = [w for w in all_workspaces() if w["id"] not in before]
+        exact = [w for w in fresh if w.get("current_directory") == e["cwd"]]
+        fresh = exact or fresh
+        if len(fresh) != 1:
+            print(f"  rebuilt  {title[:44]} — but could not identify the new "
+                  f"workspace; entry left under {old_id}")
+            continue
+        new = fresh[0]
+        # The surfaces died with the old workspace, so their ids would target
+        # nothing and unpark would silently type into the void. A rebuilt
+        # workspace has exactly one surface; drop the ids and let unpark use it.
+        for s in e["sessions"]:
+            s["surface"] = ""
+        e.update({"workspace_id": new["id"], "workspace_ref": new["ref"],
+                  "window_id": new.get("window_id")})
+        write_entry(ledger_path(new["id"]), e)
+        if new["id"] != old_id:
+            ledger_path(old_id).unlink(missing_ok=True)
+        before.add(new["id"])
+        print(f"  rebuilt  {title[:44]}  → {new['ref']}")
+    print()
+
+
+# --- Interactive picker ------------------------------------------------------
+def focus_workspace(row, ws_by_ref):
+    """Jump to a workspace without leaving the picker."""
+    ws = ws_by_ref.get(row["ref"]) or row
+    if ws.get("window_id"):
+        cmux_do("focus-window", "--window", ws["window_id"])
+    cmux_do("select-workspace", "--workspace", row["id"])
+
+
+HELP_LINE = ("↑↓/jk move   enter freeze/unfreeze   a whole window   "
+             "f focus   r refresh   q quit")
+
+
+def _put(win, y, x, text, attr=0):
+    """Write one line, truncated by CHARACTERS.
+
+    curses' addnstr counts its limit in bytes, so passing a column count
+    corrupts every line whose title holds multibyte characters — the garbage
+    starts right after the accented word and runs to end of line.
+    """
+    h, w = win.getmaxyx()
+    if y >= h or x >= w:
+        return
+    try:
+        win.addstr(y, x, text[:max(0, w - x - 1)], attr)
+    except curses.error:  # bottom-right cell always raises
+        pass
+
+
+def _confirm(stdscr, picked, C):
+    """Modal y/N gate. Only a literal 'y' proceeds; anything else cancels."""
+    to_park = [r for r in picked if not r["parked"]]
+    to_unpark = [r for r in picked if r["parked"]]
+    freed = sum(r["bytes"] for r in to_park)
+    dirty = sum(1 for r in to_park if r["dirty"])
+
+    body = []
+    if to_park:
+        body.append(f"park {len(to_park)} workspace(s), freeing {human(freed)}")
+        for r in to_park[:8]:
+            body.append(f"   ❄ {r['ref']:<13} {r['title'][:34]}")
+        if len(to_park) > 8:
+            body.append(f"   … and {len(to_park) - 8} more")
+    if to_unpark:
+        body.append(f"unpark {len(to_unpark)} workspace(s)")
+        for r in to_unpark[:8]:
+            body.append(f"   ▶ {r['ref']:<13} {r['title'][:34]}")
+    if dirty:
+        body.append(f"{dirty} have uncommitted changes (git is not touched)")
+    body.append("")
+    body.append("dev servers and test browsers stop and are NOT restarted")
+    body.append("")
+    body.append("press  y  to apply       any other key cancels")
+
+    h, w = stdscr.getmaxyx()
+    bh, bw = min(len(body) + 4, h), min(max(len(line) for line in body) + 6, w)
+    top, left = max(0, (h - bh) // 2), max(0, (w - bw) // 2)
+    win = curses.newwin(bh, bw, top, left)
+    win.erase()
+    win.box()
+    _put(win, 0, 2, " confirm ", curses.A_BOLD | C(4))
+    for i, line in enumerate(body):
+        if i + 2 >= bh:
+            break
+        attr = curses.A_BOLD if line.startswith("press") else 0
+        _put(win, i + 2, 3, line, attr)
+    win.refresh()
+    k = win.getch()
+    return k == ord("y")
+
+
+def _picker(stdscr, rows, ws_by_ref, reload):
+    """Cursor + enter toggles the row under it: live freezes, parked thaws.
+
+    The work runs on a worker thread so the list stays responsive and the row
+    can show its own in-flight state; a row already in flight ignores further
+    presses.
+    """
+    curses.curs_set(0)
+    stdscr.keypad(True)
+    stdscr.timeout(120)  # animate the in-flight spinner
+    use_color = curses.has_colors()
+    if use_color:
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_CYAN, -1)     # parked
+        curses.init_pair(2, curses.COLOR_RED, -1)      # busy / failed
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)   # in flight
+        curses.init_pair(4, curses.COLOR_YELLOW, -1)   # window header
+        curses.init_pair(5, curses.COLOR_WHITE, -1)
+
+    def C(n):
+        return curses.color_pair(n) if use_color else 0
+
+    def layout(src):
+        """The picker's whole derived view: lines, peak RAM, selectable rows.
+
+        Returned together because a refresh rebuilds all three. Carrying either
+        of the other two over would draw bars against a stale maximum, or let
+        the cursor sit on a row that has since gone busy.
+        """
+        out = []
+        for win, group in group_by_window(src):
+            out.append({"kind": "header", "win": win, "rows": group})
+            for r in group:
+                out.append({"kind": "row", "row": r, "win": win})
+        return (out, max((r["bytes"] for r in src), default=1),
+                [i for i, item in enumerate(out)
+                 if item["kind"] == "row" and not item["row"]["busy"]])
+
+    lines, peak, selectable = layout(rows)
+    if not selectable:
+        return ("quit", None)
+    cur, top = selectable[0], 0
+    jobs, lock = {}, threading.Lock()   # ref -> {"verb","done","ok","msg"}
+    pending, want_reload, stop = [None], [False], threading.Event()
+
+    def refresher():
+        """Re-scan in the background so the list tracks reality on its own.
+
+        The scan is ~1.5 s of socket round-trips, so it cannot run on the draw
+        thread. Results are staged and only swapped in when nothing is in
+        flight — worker threads mutate the very row dicts on screen, and
+        replacing them mid-kill would strand those mutations.
+        """
+        while not stop.wait(1.0):
+            if (not want_reload[0]
+                    and time.time() - refresher.last < REFRESH_SECONDS):
+                continue
+            want_reload[0] = False
+            refresher.last = time.time()
+            try:
+                fresh = reload()
+            except Exception:       # a transient socket failure must not kill it
+                continue
+            with lock:
+                pending[0] = fresh
+    refresher.last = time.time()
+    threading.Thread(target=refresher, daemon=True).start()
+
+    def move(delta):
+        nonlocal cur
+        pos = selectable.index(cur) if cur in selectable else 0
+        cur = selectable[max(0, min(len(selectable) - 1, pos + delta))]
+
+    def worker(row):
+        ref = row["ref"]
+        ws = ws_by_ref.get(ref)
+        try:
+            if row["parked"]:
+                res = unpark_one(ws)
+            else:
+                # attribute() needs EVERY workspace: longest-prefix matching
+                # is what stops /repo claiming a nested worktree's processes.
+                res = park_one(ws, attribute(list(ws_by_ref.values())),
+                               ps_table())
+        except (Exception, SystemExit) as ex:   # never kill or wedge the UI
+            res = {"ok": False, "msg": str(ex)[:60] or "failed"}
+        with lock:
+            jobs[ref].update(done=True, ok=res["ok"], msg=res.get("msg", ""))
+            if res["ok"]:
+                row["parked"] = not row["parked"]
+                if row["parked"]:
+                    row["bytes"] = res.get("freed", row["bytes"])
+                    row["state"] = "parked just now"
+                else:
+                    row["state"] = "resuming"
+
+    def toggle(row):
+        with lock:
+            j = jobs.get(row["ref"])
+            if j and not j["done"]:
+                return  # already in flight
+            jobs[row["ref"]] = {"verb": "unfreezing" if row["parked"]
+                                else "freezing", "done": False,
+                                "ok": None, "msg": ""}
+        threading.Thread(target=worker, args=(row,), daemon=True).start()
+
+    tick = 0
+    while True:
+        tick += 1
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        body = h - 4
+        if cur < top:
+            top = cur
+        elif cur >= top + body:
+            top = cur - body + 1
+
+        with lock:
+            inflight = [r for r, j in jobs.items() if not j["done"]]
+            fresh = pending[0] if not inflight else None
+            if fresh:
+                pending[0] = None
+        if fresh:
+            # Keep the cursor on the same workspace across a refresh; a list
+            # that jumps under you while you are aiming at a row is worse than
+            # no refresh at all.
+            here = lines[cur]["row"]["ref"] if lines[cur]["kind"] == "row" else None
+            spaces_new, rows = fresh
+            ws_by_ref.clear()
+            ws_by_ref.update({x["ref"]: x for x in spaces_new})
+            lines, peak, selectable = layout(rows)
+            if not selectable:
+                return ("quit", None)
+            cur = next((i for i in selectable
+                        if lines[i]["row"]["ref"] == here), selectable[0])
+        # lines holds the very same row dicts the worker thread mutates, so
+        # the totals can come straight off `rows`.
+        parked_n = sum(1 for r in rows if r["parked"])
+        free_b = sum(r["bytes"] for r in rows
+                     if not r["parked"] and not r["busy"])
+        head = (f" park — {parked_n} parked   {human(free_b)} parkable"
+                + (f"   {len(inflight)} in flight" if inflight else ""))
+        _put(stdscr, 0, 0, head.ljust(w - 1), curses.A_BOLD | C(5))
+
+        for vi in range(body):
+            li = top + vi
+            if li >= len(lines):
+                break
+            item, y = lines[li], vi + 2
+            if item["kind"] == "header":
+                free = sum(r["bytes"] for r in item["rows"]
+                           if not r["parked"] and not r["busy"])
+                _put(stdscr, y, 0,
+                     f" {item['win']}   {len(item['rows'])} ws   "
+                     f"{human(free)} parkable".ljust(w - 1),
+                     curses.A_BOLD | C(4))
+                continue
+            r = item["row"]
+            with lock:
+                job = dict(jobs.get(r["ref"]) or {})
+
+            if job and not job.get("done"):
+                mark = Spinner.FRAMES[tick % len(Spinner.FRAMES)]
+                tail, attr = job["verb"] + "…", C(3)
+            elif job and job.get("ok") is False:
+                mark, tail, attr = "✗", job.get("msg", "failed")[:24], C(2)
+            elif r["busy"]:
+                mark, tail, attr = "●", r["state"][:24], C(2)
+            elif r["parked"]:
+                mark, tail, attr = "❄", r["state"][:24], C(1)
+            else:
+                mark, tail, attr = "○", r["state"][:24], 0
+
+            txt = (f" {mark} {r['ref']:<13} {r['title'][:30]:<31}"
+                   f" {bar(r['bytes'], peak, 8, plain=True)} {human(r['bytes']):>8}"
+                   f"  {tail:<25}{flags_of(r)}")
+            if li == cur:
+                attr |= curses.A_REVERSE
+            _put(stdscr, y, 0, txt.ljust(w - 1), attr)
+
+        _put(stdscr, h - 1, 0, HELP_LINE.ljust(w - 1), curses.A_DIM)
+        stdscr.refresh()
+
+        try:
+            k = stdscr.getch()
+        except KeyboardInterrupt:
+            k = ord("q")
+        if k == -1:
+            continue  # timeout: just redraw
+        if k in (ord("q"), 27):
+            with lock:
+                busy = [r for r, j in jobs.items() if not j["done"]]
+            if busy:
+                continue  # never exit mid-kill
+            return ("quit", None)
+        if k in (ord("f"), ord("F")):
+            # Focus but STAY OPEN — you usually want to glance at a workspace
+            # and come straight back to the list.
+            focus_workspace(lines[cur]["row"], ws_by_ref)
+            continue
+        if k in (ord("r"), ord("R")):
+            want_reload[0] = True
+            continue
+        if k in (curses.KEY_DOWN, ord("j")):
+            move(1)
+        elif k in (curses.KEY_UP, ord("k")):
+            move(-1)
+        elif k == curses.KEY_NPAGE:
+            move(body)
+        elif k == curses.KEY_PPAGE:
+            move(-body)
+        elif k in (curses.KEY_ENTER, 10, 13):
+            row = lines[cur]["row"]
+            if not row["busy"]:
+                toggle(row)
+        elif k == ord("a"):
+            win = lines[cur]["win"]
+            group = [item["row"] for item in lines if item["kind"] == "row"
+                     and item["win"] == win and not item["row"]["busy"]]
+            with lock:
+                snapshot = {r["ref"]: r["parked"] for r in group}
+            live = [r for r in group if not snapshot[r["ref"]]]
+            # Whole window is bulk and destructive, so it still confirms.
+            target = live or group
+            if target and _confirm(stdscr, target, C):
+                for r in target:
+                    # A worker may have finished while the modal was up; only
+                    # act on rows still in the state the user agreed to.
+                    with lock:
+                        if r["parked"] != snapshot[r["ref"]]:
+                            continue
+                    toggle(r)
+
+
+def cmd_pick(argv):
+    with Spinner("scanning workspaces…"):
+        spaces = all_workspaces()
+        rows = collect(spaces)
+    # An optional substring narrows the list — with 40 workspaces, scrolling
+    # to the three you care about is the slow part.
+    terms = [a.lower() for a in argv if not a.startswith("--")]
+    if terms:
+        rows = [r for r in rows
+                if any(t in r["title"].lower() or t in r["ref"] for t in terms)]
+        if not rows:
+            die(f"nothing matches {' '.join(terms)}")
+    if not rows:
+        print("  nothing to show\n")
+        return
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        die("interactive picker needs a terminal — use `park ls` instead")
+    # curses renders non-ASCII as garbage unless the locale is initialised.
+    locale.setlocale(locale.LC_ALL, "")
+
+    ws_by_ref = {w["ref"]: w for w in spaces}
+    def reload():
+        """Re-scan for the picker's background refresh, same filter as above."""
+        sp = all_workspaces()
+        fresh = collect(sp)
+        if terms:
+            fresh = [r for r in fresh
+                     if any(t in r["title"].lower() or t in r["ref"]
+                            for t in terms)]
+        return sp, fresh
+
+    curses.wrapper(_picker, rows, ws_by_ref, reload)
+    print()
+
+
+USAGE = """park — free RAM from idle cmux workspaces without closing them
+
+  park                         interactive picker (enter toggles a row)
+  park pick <filter>           the same picker, pre-filtered by title
+  park ls                      what is parked / what is live and parkable
+  park park <target>...        park workspace(s). --dry-run, --force
+  park unpark <target>...      resume a parked workspace
+  park show <target>           dump the ledger entry
+  park forget <target>         drop a stale ledger entry without resuming
+  park doctor                  verify every parked entry is still restorable
+  park rebuild                 recreate workspaces cmux lost (--dry-run)
+
+targets:  workspace:12 | <uuid> | <title substring> | window:2 | .
+
+Never parks a workspace whose turn is in flight. Parking stops the claude
+session, its dev servers and any test browsers; unparking restores ONLY the
+claude session — start dev servers yourself.
+"""
+
+
+KNOWN_FLAGS = {
+    "ls": ("--json",), "list": ("--json",),
+    "park": ("--dry-run", "--force"),
+    "pick": (), "unpark": (), "resume": (), "show": (),
+    "forget": (), "doctor": (), "rebuild": ("--dry-run",),
+}
+
+
+def main():
+    if not shutil.which("cmux"):
+        die("cmux CLI not found on PATH")
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("-h", "--help", "help"):
+        print(USAGE)
+        return
+    if not argv:  # bare `park` opens the picker
+        return cmd_pick([])
+    cmd, rest = argv[0], argv[1:]
+    if any(a in ("-h", "--help") for a in rest):
+        print(USAGE)
+        return
+    table = {"ls": cmd_ls, "list": cmd_ls, "park": cmd_park, "pick": cmd_pick,
+             "unpark": cmd_unpark, "resume": cmd_unpark, "show": cmd_show,
+             "forget": cmd_forget, "doctor": cmd_doctor, "rebuild": cmd_rebuild}
+    if cmd not in table:
+        die(f"unknown command '{cmd}'\n\n{USAGE}")
+    # Unrecognised flags used to be filtered out silently alongside the real
+    # ones, so `park park ws:12 --dry-rnu` dropped the typo and actually parked.
+    unknown = [a for a in rest
+               if a.startswith("--") and a not in KNOWN_FLAGS.get(cmd, ())]
+    if unknown:
+        die(f"unknown option {unknown[0]!r} for `park {cmd}`\n\n{USAGE}")
+    table[cmd](rest)
+
+
+if __name__ == "__main__":
+    main()

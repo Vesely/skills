@@ -86,6 +86,12 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/token-burn
   ```
 
+- **park-workspace** — Free the RAM held by idle Claude sessions in cmux without closing the workspaces, so they stay visible as your TODO list. Parks a single workspace, a whole window, or a picked set — stopping the claude session plus its dev servers and test browsers — and resumes the exact session later with full history. Ships a curses picker (enter freezes/unfreezes a row, `f` focuses the workspace), marks parked rows in the native cmux sidebar, and pre-fills the resume command at the parked prompt so coming back is one keypress. The ledger lives outside cmux, so a corrupted cmux state can't lose the session; `doctor` and `rebuild` recover from one. Never parks a session mid-turn and never touches git worktrees. Triggers on "park this workspace", "park the window", "unpark", "what's parked", or complaining that idle cmux sessions eat RAM.
+
+  ```
+  npx skills@latest add Vesely/skills/park-workspace
+  ```
+
 ### Utilities
 
 - **screencast** — Turn an agent-browser session into a polished product-demo video, fully local and free. Records the browser flow the agent drives, then composites an MP4 with auto zoom-to-click, an animated cursor + trail, click ripples, a keystroke overlay, idle trimming, chapters (lower-thirds + embedded MP4 chapters), and a gradient/rounded/shadowed frame. Screen-Studio-style output, produced by the agent. Requires agent-browser, ffmpeg, Node.
