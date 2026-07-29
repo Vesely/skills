@@ -2183,6 +2183,7 @@ USAGE = """park — free RAM from idle cmux workspaces without closing them
   park                         interactive picker (enter toggles a row)
   park pick <filter>           the same picker, pre-filtered by title
   park ls                      what is parked / what is live and parkable
+  park .                       park the workspace you are in
   park park <target>...        park workspace(s). --dry-run, --force
   park unpark <target>...      resume a parked workspace
   park show <target>           dump the ledger entry
@@ -2219,6 +2220,12 @@ def main():
     if any(a in ("-h", "--help") for a in rest):
         print(USAGE)
         return
+    # `park .` is `park park .`. Parking the workspace you are in is the one
+    # target worth a shortcut, and `.` can never be mistaken for a verb. Bare
+    # targets in general stay unsupported on purpose: `park doctorr` must not
+    # silently kill whatever happens to match the typo.
+    if cmd == ".":
+        cmd, rest = "park", ["."] + rest
     table = {"ls": cmd_ls, "list": cmd_ls, "park": cmd_park, "pick": cmd_pick,
              "unpark": cmd_unpark, "resume": cmd_unpark, "show": cmd_show,
              "forget": cmd_forget, "doctor": cmd_doctor, "rebuild": cmd_rebuild}

@@ -32,6 +32,7 @@ Without that link, call it as `~/.claude/skills/park-workspace/park.py <cmd>`.
 ```
 park                       interactive picker    [park pick <filter>]
 park ls                    dashboard grouped by window   [--json]
+park .                     park the workspace you are in
 park park <target>...      park workspace(s)      [--dry-run] [--force]
 park unpark <target>...    resume a parked workspace
 park show <target>         dump the ledger entry
@@ -439,7 +440,7 @@ Command Palette.
                  "target": "newTabInCurrentPane", "shortcut": "cmd+alt+p",
                  "keywords": ["park", "freeze", "ram"] },
   "park-here": { "type": "command", "title": "Park this workspace",
-                 "command": "/Users/you/.local/bin/park park .",
+                 "command": "/Users/you/.local/bin/park .",
                  "target": "newTabInCurrentPane", "shortcut": "cmd+alt+f",
                  "confirm": true }
 }
@@ -452,9 +453,10 @@ Command Palette.
   would be typed into its input box instead of a shell.
 - Use an **absolute path** to `park`: the action is not run through a login
   shell, so `~/.local/bin` is not necessarily on its PATH.
-- `park park .` resolves `.` from `CMUX_WORKSPACE_ID`, which the new tab
-  inherits — so the shortcut parks the workspace it was pressed in, and the tab
-  running it is a plain shell park does not touch.
+- `park .` (shorthand for `park park .`) resolves `.` from the
+  `CMUX_WORKSPACE_ID` the new tab inherits — so the shortcut parks the
+  workspace it was pressed in, and the tab running it is a plain shell park
+  does not touch.
 - Take the key from the **`⌘⌥` namespace**: every ⌘⌥ letter is unbound in cmux,
   while ⌘⇧P, ⌘⇧F and most other ⌘⇧ letters are taken. `cmux config doctor`
   validates JSONC syntax only, so a shortcut that does not bind fails silently;
