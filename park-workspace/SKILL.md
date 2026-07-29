@@ -260,10 +260,22 @@ absolute path happily, at which point `unlink()` deletes something else.
   call sits near 0% CPU — so for those both gates wrongly read "idle". When the
   pill is absent, the transcript's mtime is the tiebreaker: an active turn
   appends to it continuously, so anything written in the last 20 s counts as
-  busy. The pre-kill re-check re-runs **both** gates — re-reading only the pill
-  meant it could never fire for the very workspaces the transcript gate exists
-  for. `--force` overrides, but an in-flight turn is the one thing that is
-  genuinely lost.
+  busy. The pre-kill re-check re-runs the **same verdict**, not a weaker one.
+  `--force` overrides, but an in-flight turn is the one thing that is genuinely
+  lost.
+- **The pill also sticks.** A workspace can read `Running` long after its turn
+  ended — one was seen 45 minutes stale — and believing it makes that workspace
+  permanently unparkable, with `--force` (which drops every other check too) as
+  the only way out. So a busy pill must be corroborated: quiet for
+  `STALE_PILL_SECONDS` (10 min) with the CPU gate already passed means the pill
+  is lying, and park says so in a note. The window is long on purpose — a single
+  tool call can legitimately write nothing while it runs, and being slow to park
+  costs nothing next to killing a live turn.
+- `ls` and the picker mark such rows `Running (stale)` and offer them, using
+  cmux's `latest_submitted_at` as a free proxy. That is only a **hint**:
+  resolving each session's real transcript here turned a 1.6 s scan into 16 s,
+  and `park_one` checks the real thing anyway, so the worst case is a row that
+  offers itself and then refuses with a reason.
 - **`cpu_sample` reports load, not a delta.** macOS `%cpu` is already a decaying
   average, so subtracting two samples measures *acceleration*: a session pinned
   at 100% gave deltas of −4.1, +3.5, −42.1, all under the 15% threshold. For as

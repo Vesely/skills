@@ -37,6 +37,10 @@ PARKED_COLOR = "Charcoal"
 SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 # How often the picker re-scans on its own (seconds).
 REFRESH_SECONDS = 6.0
+# How long a "Running" pill must go unbacked by transcript writes before it is
+# treated as stale. Long on purpose: one tool call can legitimately write
+# nothing while it runs.
+STALE_PILL_SECONDS = 600.0
 
 # A turn is in flight -> never park. Anything else is fair game.
 BUSY_STATES = {"running", "working", "thinking", "compacting"}
@@ -982,9 +986,20 @@ def collect(spaces=None):
             or git_info(kw[0].get("current_directory")) or {}, keep)
         states, gits = f_state.result(), f_git.result()
 
+    # The pill sticks: a workspace can read `Running` long after its turn ended,
+    # and a display that calls it busy makes it untoggleable in the picker even
+    # though `park` would now accept it. cmux's own latest_submitted_at is a
+    # free proxy — globbing project dirs for the real transcript turned a 1.6 s
+    # scan into 16 s. It is only a HINT: `park_one` still checks the resolved
+    # session's transcript, so the worst case is a row that offers itself and
+    # then refuses with a reason.
+    stales = [st.lower() in BUSY_STATES
+              and seconds_since(w.get("latest_submitted_at")) >= STALE_PILL_SECONDS
+              for (w, _, _, _, _, _), st in zip(keep, states)]
+
     rows = []
-    for (w, procs, claude, dev, browser, entry), state, g in zip(
-            keep, states, gits):
+    for (w, procs, claude, dev, browser, entry), state, g, is_stale in zip(
+            keep, states, gits, stales):
         last = (w.get("latest_submitted_message") or "").strip().replace("\n", " ")
         rows.append({
             "ref": w["ref"], "id": w["id"],
@@ -997,8 +1012,8 @@ def collect(spaces=None):
             "parked": bool(entry),
             "bytes": (entry.get("freed_bytes", 0) if entry
                       else sum(p["rss"] for p in procs)),
-            "state": state or "-",
-            "busy": state.lower() in BUSY_STATES,
+            "state": (state + " (stale)") if is_stale else (state or "-"),
+            "busy": state.lower() in BUSY_STATES and not is_stale,
             "dev": len(dev), "browser": len(browser),
             "branch": g.get("branch"), "dirty": g.get("dirty_files") or 0,
             "note": entry.get("note") or last,
@@ -1115,12 +1130,54 @@ def pid_matches(p):
     return r.returncode == 0 and r.stdout.strip() == p["cmd"].strip()
 
 
+def seconds_since(iso):
+    """Age of an ISO timestamp in seconds; inf when missing or unparseable."""
+    if not isinstance(iso, str) or not iso:
+        return float("inf")
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return float("inf")
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - t).total_seconds()
+
+
 def transcript_age(path):
     """Seconds since the transcript was last appended to; inf if unknown."""
     try:
         return max(0.0, time.time() - Path(path).stat().st_mtime)
     except OSError:
         return float("inf")
+
+
+def busy_verdict(state, sessions):
+    """Decide whether a turn is really in flight. -> (pill_was_stale, refusal)
+
+    Neither signal is trustworthy alone, and they fail in OPPOSITE directions:
+
+    - No pill at all (about a third of workspaces) and a session blocked on a
+      slow tool call sits near 0% CPU, so both other gates read "idle" while a
+      turn is running. The transcript catches that.
+    - The pill also STICKS. A workspace can read `Running` for half an hour
+      after the turn ended, and believing it makes that workspace permanently
+      unparkable — the user's only way out being `--force`, which throws away
+      every other check at the same time.
+
+    So a busy pill has to be corroborated. Quiet for STALE_PILL_SECONDS with
+    the CPU gate already passed means the pill is lying. The window is long on
+    purpose: a single tool call can legitimately write nothing while it runs,
+    and being slow to park costs nothing next to killing a live turn.
+    """
+    quiet = min((transcript_age(s["transcript"]) for s in sessions),
+                default=float("inf"))
+    if state.lower() in BUSY_STATES:
+        if quiet < STALE_PILL_SECONDS:
+            return False, f"turn in flight ({state})"
+        return True, None
+    if quiet < 20:
+        return False, "recent transcript activity (no status pill)"
+    return False, None
 
 
 def park_one(w, by_ws, table, dry=False, force=False):
@@ -1142,9 +1199,6 @@ def park_one(w, by_ws, table, dry=False, force=False):
         return res
 
     state = workspace_status(w["id"]).get("claude_code", "")
-    if state.lower() in BUSY_STATES and not force:
-        res["msg"] = f"turn in flight ({state})"
-        return res
     if cpu_sample([p["pid"] for p in claude]) > 15.0 and not force:
         res["msg"] = "busy (cpu)"
         return res
@@ -1164,14 +1218,16 @@ def park_one(w, by_ws, table, dry=False, force=False):
                          "cwd": cwd, "resume_command": command,
                          "id_source": source, "surface": p["surface"]})
 
-    # A third of workspaces carry no claude_code pill at all, and a session
-    # blocked on a slow tool call sits near 0% CPU — so for those two gates
-    # agree it is idle while a turn is in flight. The transcript is the ground
-    # truth: an active turn appends to it continuously.
-    if not state and not force and any(transcript_age(s["transcript"]) < 20
-                                       for s in sessions):
-        res["msg"] = "recent transcript activity (no status pill)"
-        return res
+    if not force:
+        stale, why = busy_verdict(state, sessions)
+        if why:
+            res["msg"] = why
+            return res
+        if stale:
+            res["notes"].append(f"status pill said {state!r} but nothing has "
+                                "been written for "
+                                f"{int(min(transcript_age(s['transcript']) for s in sessions) / 60)}"
+                                " min — treated as idle")
 
     cwd = sessions[0]["cwd"]
     freed = sum(p["rss"] for p in procs)
@@ -1205,15 +1261,13 @@ def park_one(w, by_ws, table, dry=False, force=False):
     # The topology drifts: a session can start a turn between the busy gate
     # above and this kill. Re-check immediately before mutating.
     if not force:
+        # The same verdict, not a weaker version of it: re-reading only the
+        # pill was a no-op for a workspace that has none, and would have
+        # re-refused the stale-pill workspace this just cleared.
         again = workspace_status(w["id"]).get("claude_code", "")
-        if again.lower() in BUSY_STATES:
-            res["msg"] = f"became busy ({again})"
-            return res
-        # Re-run the SAME pair of gates, not just the pill: for a workspace with
-        # no pill the line above is always "" and the re-check was a no-op.
-        if not again and any(transcript_age(s["transcript"]) < 20
-                             for s in sessions):
-            res["msg"] = "became busy (transcript)"
+        _, why = busy_verdict(again, sessions)
+        if why:
+            res["msg"] = f"became busy — {why}"
             return res
 
     # Claiming the ledger file atomically IS the "already parked" guard: the
