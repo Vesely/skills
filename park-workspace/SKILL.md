@@ -424,14 +424,49 @@ the agent was alive. It only does so when the workspace has no custom name of
 its own (`has_custom_title`), and records `pinned_title` in the ledger so unpark
 clears only a name park itself set, never the user's.
 
-There is no way to add a freeze/unfreeze item to cmux's workspace or tab
-right-click menu, and no user-definable keyboard shortcuts — those menus are
-built into the app and `cmux docs settings` exposes no extension point. The
-supported equivalent is a **Dock control** running the picker in the right
-sidebar. Note the seam with the focus-driven refresh above: a dock panel is
-visible but never focused, so it keeps its 30 s cadence only until you click
-into it and back out — after that it waits for you to click in again, or for
-`r`.
+cmux's **workspace and tab right-click menus are not extensible** — the only
+context menus a config can reach are the `+` button's
+(`ui.newWorkspace.contextMenu`, plus the per-group one under
+`workspaceGroups.byCwd`). **Keyboard shortcuts are** — this doc used to claim
+they were not, which was wrong: an entry in the `actions` registry of
+`~/.config/cmux/cmux.json` carries its own `shortcut` and shows up in the
+Command Palette.
+
+```json
+"actions": {
+  "park-pick": { "type": "command", "title": "Park — freeze/unfreeze",
+                 "command": "/Users/you/.local/bin/park pick",
+                 "target": "newTabInCurrentPane", "shortcut": "cmd+alt+p",
+                 "keywords": ["park", "freeze", "ram"] },
+  "park-here": { "type": "command", "title": "Park this workspace",
+                 "command": "/Users/you/.local/bin/park park .",
+                 "target": "newTabInCurrentPane", "shortcut": "cmd+alt+f",
+                 "confirm": true }
+}
+```
+
+`cmux reload-config` applies it without a restart. Four things that bite:
+
+- `target` must be **`newTabInCurrentPane`**, never `currentTerminal` — the
+  current terminal is normally the claude session being parked, so the command
+  would be typed into its input box instead of a shell.
+- Use an **absolute path** to `park`: the action is not run through a login
+  shell, so `~/.local/bin` is not necessarily on its PATH.
+- `park park .` resolves `.` from `CMUX_WORKSPACE_ID`, which the new tab
+  inherits — so the shortcut parks the workspace it was pressed in, and the tab
+  running it is a plain shell park does not touch.
+- Take the key from the **`⌘⌥` namespace**: every ⌘⌥ letter is unbound in cmux,
+  while ⌘⇧P, ⌘⇧F and most other ⌘⇧ letters are taken. `cmux config doctor`
+  validates JSONC syntax only, so a shortcut that does not bind fails silently;
+  the docs give the chord as a string (`"cmd+alt+p"`), but Settings > Keyboard
+  Shortcuts writes built-in bindings as an object
+  (`{"first": {"command": true, "option": true, "key": "p", …}}`). If the string
+  form does not take, try that shape.
+
+A **Dock control** is the other placement — the picker in the right sidebar.
+Note the seam with the focus-driven refresh above: a dock panel is visible but
+never focused, so it keeps its 30 s cadence only until you click into it and
+back out — after that it waits for you to click in again, or for `r`.
 
 ```json
 { "controls": [
