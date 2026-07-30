@@ -33,7 +33,7 @@ Without that link, call it as `~/.claude/skills/park-workspace/park.py <cmd>`.
 park                       interactive picker    [park pick <filter>]
 park ls                    dashboard grouped by window   [--json]
 park .                     park the workspace you are in
-park park <target>...      park workspace(s)      [--dry-run] [--force]
+park park <target>...      park workspace(s)  [--dry-run] [--force] [--kill-anyway]
 park unpark <target>...    resume a parked workspace
 park show <target>         dump the ledger entry
 park forget <target>       drop a stale ledger entry without resuming
@@ -297,12 +297,26 @@ absolute path happily, at which point `unlink()` deletes something else.
   pill is absent, the transcript's mtime is the tiebreaker: an active turn
   appends to it continuously, so anything written in the last 20 s counts as
   busy. The pre-kill re-check re-runs the **same verdict**, not a weaker one.
-  `--force` overrides, but an in-flight turn is the one thing that is genuinely
-  lost.
+  Only `--kill-anyway` overrides this, and an in-flight turn is the one thing
+  that is genuinely lost when it does.
+- **The two overrides are deliberately not one flag.** `--force` waives the CPU
+  sample and nothing else — that gate is corroboration, and it is what makes a
+  workspace running one long tool call look busy for as long as it runs.
+  `--kill-anyway` waives the draft guard and the in-flight verdict as well, so
+  it is the only path that can lose work; it lists what it is about to kill,
+  requires a typed `yes`, and refuses outright without a terminal to ask at. A
+  single flag that dropped every check at once made the safe override and the
+  destructive one the same keystroke.
+- **park never parks the session it is running in.** `kill_tree` works
+  leaves-first, so parking your own tree kills park before it reaches the
+  session: ledger written, session dead, no pill, no colour, no prefill. The
+  guard walks this process's ancestry and refuses if any kill target is in it —
+  no flag turns it off. This is why an agent cannot park its own workspace on
+  request; a new tab (⌘⌥F or any shell in the workspace) is a child of cmux,
+  not of claude, and parks it fine.
 - **The pill also sticks.** A workspace can read `Running` long after its turn
   ended — one was seen 45 minutes stale — and believing it makes that workspace
-  permanently unparkable, with `--force` (which drops every other check too) as
-  the only way out. So a busy pill must be corroborated: quiet for
+  permanently unparkable. So a busy pill must be corroborated: quiet for
   `STALE_PILL_SECONDS` (10 min) with the CPU gate already passed means the pill
   is lying, and park says so in a note. The window is long on purpose — a single
   tool call can legitimately write nothing while it runs, and being slow to park

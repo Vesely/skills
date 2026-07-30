@@ -703,6 +703,20 @@ def tree_rss(procs, table):
     return sum(table[c]["rss"] for c in seen if c in table)
 
 
+def self_pids(table=None):
+    """Our own pid and every ancestor of it.
+
+    Anything an agent runs is a descendant of its claude session, so this chain
+    is the whole test for "am I inside what I am about to kill".
+    """
+    table = table if table is not None else ps_table()
+    chain, pid = set(), os.getpid()
+    while pid and pid not in chain:
+        chain.add(pid)
+        pid = table.get(pid, {}).get("ppid", 0)
+    return chain
+
+
 def kill_tree(pid, sig=15):
     """SIGTERM a pid and its descendants, children first.
 
@@ -1320,11 +1334,18 @@ def busy_verdict(state, sessions):
     return False, None
 
 
-def park_one(w, by_ws, table, dry=False, force=False):
+def park_one(w, by_ws, table, dry=False, force=False, brutal=False):
     """Park one workspace. Returns a result dict; prints nothing.
 
     Silence matters: the picker calls this from a worker thread while curses
     owns the screen.
+
+    Two levels of override, because they are not the same risk. `force` waives
+    the CPU sample, which is only ever corroboration and is the gate that makes
+    a workspace running a heavy tool call look busy for as long as it runs.
+    `brutal` (`--kill-anyway`) waives the draft guard and the in-flight verdict
+    too — the two things Rule #1 is made of — so it is the only way to lose a
+    running turn, and `cmd_park` makes the user type it out and confirm.
     """
     ref, title = w["ref"], (w["title"] or "")
     res = {"ref": ref, "title": title, "ok": False, "freed": 0, "notes": []}
@@ -1338,10 +1359,23 @@ def park_one(w, by_ws, table, dry=False, force=False):
         res["msg"] = "no claude session"
         return res
 
+    # Not a heuristic, and no flag turns it off: kill_tree works leaves-first,
+    # so parking the tree park is running inside kills park before it ever
+    # reaches the session — ledger written, session dead, and none of the pill,
+    # colour or prefill that make a parked workspace recoverable by walking
+    # into it. An agent asked to park its own workspace lands here. A new tab
+    # (⌘⌥F, or any shell in the workspace) is a child of cmux, not of claude,
+    # and parks it fine.
+    mine = self_pids(table)
+    if any(p["pid"] in mine for p in claude + dev + browser):
+        res["msg"] = ("park is running inside this session — "
+                      "park it from a new tab")
+        return res
+
     # A draft exists ONLY in the agent's input box — no transcript, no process
     # state, nothing on disk — so killing the session is the one operation that
     # destroys it silently. Checked before anything expensive, and per tab.
-    if not force:
+    if not brutal:
         for c in claude:
             draft = unsent_input(w["id"], c.get("surface"))
             if draft is None:
@@ -1352,7 +1386,7 @@ def park_one(w, by_ws, table, dry=False, force=False):
                 return res
 
     state = workspace_status(w["id"]).get("claude_code", "")
-    if cpu_sample([p["pid"] for p in claude]) > 15.0 and not force:
+    if cpu_sample([p["pid"] for p in claude]) > 15.0 and not (force or brutal):
         res["msg"] = "busy (cpu)"
         return res
 
@@ -1371,7 +1405,7 @@ def park_one(w, by_ws, table, dry=False, force=False):
                          "cwd": cwd, "resume_command": command,
                          "id_source": source, "surface": p["surface"]})
 
-    if not force:
+    if not brutal:
         stale, why = busy_verdict(state, sessions)
         if why:
             res["msg"] = why
@@ -1413,7 +1447,7 @@ def park_one(w, by_ws, table, dry=False, force=False):
 
     # The topology drifts: a session can start a turn between the busy gate
     # above and this kill. Re-check immediately before mutating.
-    if not force:
+    if not brutal:
         # The same verdict, not a weaker version of it: re-reading only the
         # pill was a no-op for a workspace that has none, and would have
         # re-refused the stale-pill workspace this just cleared.
@@ -1719,11 +1753,36 @@ def unpark_one(w, allow_exec=False):
     return res
 
 
+def confirm_kill_anyway(targets):
+    """Make the one flag that can lose a running turn a deliberate act.
+
+    Everything else in park refuses when it is unsure; `--kill-anyway` is where
+    the user overrules that, so it asks out loud and needs a terminal to ask
+    at — a scripted `--kill-anyway` would be exactly the unattended
+    turn-killing this tool exists not to do.
+    """
+    if not sys.stdin.isatty():
+        die("--kill-anyway needs a terminal to confirm at")
+    print("\n  --kill-anyway ignores unsent drafts AND turns in flight.")
+    print("  Anything still working below loses the turn:\n")
+    for w in targets:
+        print(f"    {w['ref']:<13} {(w.get('title') or '')[:50]}")
+    try:
+        answer = input("\n  type 'yes' to go ahead: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer != "yes":
+        die("aborted")
+
+
 def cmd_park(argv):
     dry = "--dry-run" in argv
     force = "--force" in argv
+    brutal = "--kill-anyway" in argv
     targets = targets_from(
         argv, "no target — pass a workspace ref, a title, `window:N`, or `.`")
+    if brutal and not dry:
+        confirm_kill_anyway(targets)
 
     with Spinner("checking what is safe to park…"):
         by_ws = attribute(all_workspaces())
@@ -1731,7 +1790,7 @@ def cmd_park(argv):
 
     total, done = 0, 0
     for w in targets:
-        r = park_one(w, by_ws, table, dry=dry, force=force)
+        r = park_one(w, by_ws, table, dry=dry, force=force, brutal=brutal)
         mark = ("would park" if dry else "❄") if r["ok"] else "skip"
         print(f"  {mark:<11} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
         for n in r["notes"]:
@@ -2310,7 +2369,7 @@ USAGE = """park — free RAM from idle cmux workspaces without closing them
   park pick <filter>           the same picker, pre-filtered by title
   park ls                      what is parked / what is live and parkable
   park .                       park the workspace you are in
-  park park <target>...        park workspace(s). --dry-run, --force
+  park park <target>...        park workspace(s). --dry-run, overrides below
   park unpark <target>...      resume a parked workspace
   park show <target>           dump the ledger entry
   park forget <target>         drop a stale ledger entry without resuming
@@ -2319,15 +2378,20 @@ USAGE = """park — free RAM from idle cmux workspaces without closing them
 
 targets:  workspace:12 | <uuid> | <title substring> | window:2 | .
 
-Never parks a workspace whose turn is in flight. Parking stops the claude
-session, its dev servers and any test browsers; unparking restores ONLY the
-claude session — start dev servers yourself.
+overrides: --force        waive the CPU sample (corroboration only)
+           --kill-anyway  waive the draft guard and the in-flight verdict too;
+                          asks for confirmation, needs a terminal
+
+Never parks a workspace whose turn is in flight, and never parks the session
+park itself is running in. Parking stops the claude session, its dev servers
+and any test browsers; unparking restores ONLY the claude session — start dev
+servers yourself.
 """
 
 
 KNOWN_FLAGS = {
     "ls": ("--json",), "list": ("--json",),
-    "park": ("--dry-run", "--force"),
+    "park": ("--dry-run", "--force", "--kill-anyway"),
     "pick": (), "unpark": (), "resume": (), "show": (),
     "forget": (), "doctor": (), "rebuild": ("--dry-run",),
 }
