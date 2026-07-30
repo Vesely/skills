@@ -31,6 +31,10 @@ from pathlib import Path
 LEDGER = Path.home() / ".claude" / "parked"
 PILL_KEY = "parked"
 PARKED_COLOR = "Charcoal"
+# Typed (not run) at a parked prompt, so the workspace comes back by walking
+# into it and pressing enter. Also what `clear_prefill` matches on before it
+# wipes a line, so the two must stay the same string.
+PREFILL = "park unpark ."
 # A session id ends up inside a command run by /bin/sh. The lsof and argv paths
 # are regex-constrained, but the last-resort scan returns a raw FILENAME stem,
 # so a file called `x; touch /tmp/PWNED #.jsonl` would execute on unpark.
@@ -723,12 +727,31 @@ def kill_tree(pid, sig=15):
     return killed
 
 
-def alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
-        return False
+def still_running(procs):
+    """Which of these processes are still holding resources.
+
+    `kill(pid, 0)` answers the wrong question twice. A zombie answers it
+    happily — it keeps a process-table entry until its parent reaps it, and
+    park kills children before parents, so the naive check reports the very
+    processes it just killed as survivors and triggers the rollback below.
+    EPERM is the opposite trap: the process is alive, we simply may not signal
+    it, and reading that as dead reports RAM freed that never was.
+
+    One `ps` sweep answers both: absent is gone, `Z` is a corpse waiting to be
+    reaped, anything else is really running.
+    """
+    r = subprocess.run(["ps", "-Ao", "pid=,state="], capture_output=True,
+                       text=True)
+    states = {}
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            try:
+                states[int(parts[0])] = parts[1]
+            except ValueError:
+                pass
+    return [p for p in procs
+            if not states.get(p["pid"], "Z").startswith("Z")]
 
 
 # --- Ledger ------------------------------------------------------------------
@@ -1203,6 +1226,39 @@ def transcript_age(path):
         return float("inf")
 
 
+def read_screen(ws_id, surface=None):
+    """The visible lines on a surface, or None when they cannot be read.
+
+    Retried, and a failure is reported rather than swallowed: both callers use
+    the screen to decide whether they are about to destroy something the user
+    typed, and `check=False` hands them an empty screen — indistinguishable
+    from a clean one — on any socket hiccup.
+    """
+    args = ["read-screen", "--workspace", ws_id]
+    if surface:
+        args += ["--surface", surface]
+    try:
+        return cmux(*args, retries=2).splitlines()
+    except RuntimeError:
+        return None
+
+
+def prompt_line(ws_id, surface=None):
+    """The last non-empty line on a surface, or None when it cannot be read.
+
+    A parked tab sits at a SHELL prompt, which `unsent_input` deliberately
+    cannot see (it requires the agent's fenced input box), so telling park's
+    own prefill apart from something the user typed needs the raw line.
+    """
+    lines = read_screen(ws_id, surface)
+    if lines is None:
+        return None
+    for line in reversed(lines):
+        if line.strip():
+            return line.rstrip()
+    return ""
+
+
 def unsent_input(ws_id, surface=None):
     """Text the user typed but has not submitted, or messages queued behind the
     turn. Killing the session throws both away with no record anywhere.
@@ -1214,11 +1270,14 @@ def unsent_input(ws_id, surface=None):
     The agent's input box is a `>` line fenced by box rules; requiring the rule
     above it is what stops a plain shell prompt (starship uses the same glyph)
     from reading as a draft.
+
+    Returns the draft, `""` when the screen was read and held none, and None
+    when it could not be read at all — a guard against the one unrecoverable
+    loss must not answer "no draft" because the socket hiccuped.
     """
-    args = ["read-screen", "--workspace", ws_id]
-    if surface:
-        args += ["--surface", surface]
-    lines = cmux(*args, check=False, retries=0).splitlines()
+    lines = read_screen(ws_id, surface)
+    if lines is None:
+        return None
     for i, line in enumerate(lines):
         body = line.strip()
         if not body or body[0] not in "\u276f>":
@@ -1285,6 +1344,9 @@ def park_one(w, by_ws, table, dry=False, force=False):
     if not force:
         for c in claude:
             draft = unsent_input(w["id"], c.get("surface"))
+            if draft is None:
+                res["msg"] = "cannot read the prompt to check for unsent text"
+                return res
             if draft:
                 res["msg"] = f"unsent text in the prompt: {draft[:40]!r}"
                 return res
@@ -1387,19 +1449,33 @@ def park_one(w, by_ws, table, dry=False, force=False):
     for p in victims:
         kill_tree(p["pid"])
     time.sleep(1.5)
-    survivors = [p for p in victims if alive(p["pid"])]
+    survivors = still_running(victims)
     for p in survivors:                     # escalate rather than report a lie
         kill_tree(p["pid"], sig=signal.SIGKILL)
     if survivors:
         time.sleep(0.5)
-    stubborn = [p for p in survivors if alive(p["pid"])]
-    if stubborn:
-        # Roll back: the ledger would claim parked while the session is alive,
-        # and `unpark` would then start a second process on that transcript.
+    stubborn = still_running(survivors)
+    if stubborn and len(still_running(claude)) == len(claude):
+        # Nothing irreplaceable is gone yet, so a clean rollback is the honest
+        # answer: the ledger would otherwise claim parked while the session is
+        # alive, and `unpark` would start a second process on that transcript.
         ledger_path(w["id"]).unlink(missing_ok=True)
         res["msg"] = (f"{len(stubborn)} process(es) survived TERM and KILL — "
                       "left running, nothing recorded")
         return res
+    if stubborn:
+        # Past this point at least one session is already dead, and the ledger
+        # holds the ONLY copy of its id, transcript and resume command. Deleting
+        # it to report a tidy failure would destroy exactly what park exists to
+        # preserve — over a dev server that would not die. Keep it, and stop
+        # counting the survivor's memory as freed.
+        freed = max(0, freed - sum(p.get("rss", 0) for p in stubborn))
+        res["freed"] = entry["freed_bytes"] = freed
+        write_entry(ledger_path(w["id"]), entry)
+        res["notes"].append(
+            f"{len(stubborn)} process(es) survived TERM and KILL and are still "
+            "running: " + ", ".join(f"{p['pid']} {p['cmd'][:40]}"
+                                    for p in stubborn))
 
     after = worktree_fingerprint(cwd)
     if before and after != before:
@@ -1412,7 +1488,7 @@ def park_one(w, by_ws, table, dry=False, force=False):
     # pill and the ledger. One workspace parks and resumes as a unit, so it does
     # not matter which tab you land on.
     for s in sessions:
-        send_text("park unpark .", w["id"], s.get("surface"))
+        send_text(PREFILL, w["id"], s.get("surface"))
 
     cmux_do("set-status", PILL_KEY, f"Parked · {human(freed)} freed",
             "--icon", "snowflake", "--color", "#5AC8FA", "--priority", "90",
@@ -1471,12 +1547,31 @@ def clear_prefill(ws_id, sessions):
 
     Without this, `forget` leaves a command that will only ever answer
     "not parked" sitting under the user's cursor.
+
+    Only ever wipes park's own line. ctrl+u has no undo, and by the time this
+    runs the prefill can be long gone with the user's own half-typed command in
+    its place — the "resumed behind our back" path in `unpark_one` reaches here
+    with a live agent prompt on screen. A line that no longer ENDS in the
+    prefill is left alone; the leftover is a cosmetic annoyance, the text it
+    would take with it is not.
+
+    Returns False when a surface's screen could not be read at all, so a caller
+    about to type onto that prompt can decline rather than append to whatever
+    is sitting there.
     """
+    ok = True
     for s in sessions:
+        line = prompt_line(ws_id, s.get("surface"))
+        if line is None:
+            ok = False
+            continue
+        if not line.endswith(PREFILL):
+            continue
         keys = ["send-key", "--workspace", ws_id]
         if s.get("surface"):
             keys += ["--surface", s["surface"]]
         cmux_do(*keys, "ctrl+u")
+    return ok
 
 
 def unpark_one(w, allow_exec=False):
@@ -1533,8 +1628,8 @@ def unpark_one(w, allow_exec=False):
     # appending to one transcript corrupts it.
     running = {argv_session_id(i["cmd"]) for i in ps_table().values()}
     dupes = [s["session_id"] for s in e["sessions"] if s["session_id"] in running]
-    if dupes:
-        # The session is back, so the workspace is not parked any more —
+    if dupes and len(dupes) == len(e["sessions"]):
+        # Every session is back, so the workspace is not parked any more —
         # whatever resumed it, the ledger and the sidebar are now lying. Skip
         # the resume (a second process on one transcript corrupts it) but do
         # the rest of the teardown, or the pill, the colour and the pinned
@@ -1545,12 +1640,41 @@ def unpark_one(w, allow_exec=False):
         res["ok"] = True
         res["msg"] = f"already running ({dupes[0][:8]}) — cleared parked state"
         return res
+    if dupes:
+        # Only SOME are back, which is what a half-finished unpark leaves
+        # behind. Tearing the whole entry down here would delete the resume
+        # record of the tabs that never came back — the one thing in it that
+        # cannot be reconstructed from anywhere else. Drop the live ones and
+        # carry on resuming the rest.
+        e["sessions"] = [s for s in e["sessions"]
+                         if s["session_id"] not in dupes]
+        write_entry(path, e)
+        res["notes"].append(f"{len(dupes)} tab(s) were already running and "
+                            "were left alone")
 
     # A workspace can hold several agent tabs; each is resumed into its own
     # surface. The tab this command is running in cannot be driven by sending
     # keystrokes to itself, so it is handed over with exec at the very end.
     here = None
-    sent = 0
+    sent, done = 0, set()
+
+    def gave_up(why):
+        """Stop mid-resume without losing what is still owed.
+
+        The tabs resumed before this point are live NOW. Leaving them in the
+        ledger means the next unpark finds a running session, takes the
+        "already running" path and clears the entry — throwing away the resume
+        record of exactly the tabs that never came back. Record what is still
+        outstanding instead, so a retry picks up where this stopped.
+        """
+        if done:
+            e["sessions"] = [s for s in e["sessions"]
+                             if s["session_id"] not in done]
+            write_entry(path, e)
+        res["msg"] = (f"{why} — {len(done)} tab(s) resumed, "
+                      f"{len(e['sessions'])} still parked (ledger at {path})")
+        return res
+
     for s in e["sessions"]:
         surface = s.get("surface", "")
         if allow_exec and surface and os.environ.get("CMUX_SURFACE_ID") == surface:
@@ -1564,15 +1688,17 @@ def unpark_one(w, allow_exec=False):
                 f"tab {sent + 1} needs a new agent tab; resume it with: "
                 + resume_command_for(s))
             continue
-        # Park pre-filled a command at this prompt; clear the line first or
-        # the replay concatenates onto it.
-        clear_prefill(w["id"], [s])
+        # Park pre-filled a command at this prompt; clear the line first or the
+        # replay concatenates onto it. A prompt that cannot even be read is not
+        # one to type a command onto and press enter.
+        if not clear_prefill(w["id"], [s]):
+            return gave_up("cannot read the prompt"
+                           + (f" of {surface}" if surface else ""))
         if not send_text(resume_command_for(s), w["id"], surface, submit=True):
-            res["msg"] = (f"cmux would not accept the resume command"
-                          + (f" for {surface}" if surface else "")
-                          + f" (ledger kept at {path})")
-            return res
+            return gave_up("cmux would not accept the resume command"
+                           + (f" for {surface}" if surface else ""))
         sent += 1
+        done.add(s["session_id"])
 
     restore_visual_state(w["id"], e)
     path.unlink()
