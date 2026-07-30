@@ -138,6 +138,35 @@ A scan is ~1.4 s across 45 workspaces, down from ~25 s. Keep it that way:
   even displayable from `ps` data alone, then queries only those.
 - **A `Spinner` covers the wait** on stderr, so it never redirects into output
   and stays silent when piped.
+- **A batch shares one CPU window.** `cpu_snapshots()` is system-wide and
+  corroborates ten workspaces as well as one, so `cmd_park` takes a single 2 s
+  reading for the whole batch instead of one per target. Nothing is traded
+  away: that gate is the corroborating one, and each workspace still gets its
+  own fresh pill-and-transcript verdict re-run immediately before the kill.
+- **The kill wait is polled, not slept.** `wait_gone` returns as soon as the
+  tree is gone — normally well under 200 ms — and only spends its full budget
+  on something genuinely stuck. Measured across three targets, the two changes
+  together took a dry run from 10.1 s to 5.7 s.
+- **The picker already parks in parallel** — each toggle runs `park_one` in its
+  own thread, so multi-select overlaps by itself.
+
+## Tests
+
+`python3 test_park.py` — stdlib `unittest`, ~0.7 s, no cmux required.
+
+It covers the decisions made *before* anything is killed: who counts as a dev
+server, which claude processes are root sessions, whether a turn is in flight,
+how a session comes back, and the two screen reads that stand between park and
+something the user typed. Liveness is tested against real processes, because
+the zombie case — a corpse that still answers `kill(pid, 0)` — cannot be faked
+and is what used to trigger the rollback that deleted the ledger.
+
+The suite was checked by reintroducing each fixed bug and confirming it fails:
+zombie-as-survivor, unconditional `ctrl+u`, the draft guard failing open, the
+lowercase-only session-id scan, subagents counted as root sessions, binary
+names matched anywhere in a command line, and the pill trusted without
+corroboration. All seven were caught. Add tests the same way — a test that
+still passes with the bug back in does not test what it claims.
 
 ## Why this is safe
 

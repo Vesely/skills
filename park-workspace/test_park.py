@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""Tests for the decisions park makes before it kills anything.
+
+Scope is deliberate: the functions that choose WHO dies, whether a session is
+busy, and how it comes back. Those are pure, and they are where a mistake costs
+the user a conversation. Everything that needs a live cmux socket is left to
+`park doctor` and the pty harnesses.
+
+    python3 test_park.py            # or: python3 -m unittest discover
+"""
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import park  # noqa: E402
+
+
+def proc(pid, cmd, ppid=1, rss=0, surface=None):
+    return {"pid": pid, "cmd": cmd, "ppid": ppid, "rss": rss,
+            "surface": surface}
+
+
+class TestWhoGetsKilled(unittest.TestCase):
+    """`runs_binary` and friends. Over-matching here loses unsaved work."""
+
+    def test_dev_binary_only_in_command_position(self):
+        self.assertEqual(park.kill_kind("node .bin/vite"), "dev-server")
+        self.assertEqual(park.kill_kind("node /x/node_modules/nuxi/bin/nuxi.mjs"),
+                         "dev-server")
+        self.assertEqual(park.kill_kind("npm run dev"), "dev-server")
+
+    def test_name_as_argument_is_not_a_dev_server(self):
+        for cmd in ("rg webpack src/",
+                    "vim vite.config.ts",
+                    "git commit -m 'npm run dev broke'",
+                    "tail -f /var/log/vite.log"):
+            self.assertIsNone(park.kill_kind(cmd), cmd)
+
+    def test_name_as_path_segment_is_not_a_dev_server(self):
+        self.assertIsNone(
+            park.kill_kind("node /app/node_modules/vite/dist/esbuild"))
+
+    def test_launcher_value_flag_swallows_its_argument(self):
+        # `npx --package vite prettier` runs prettier, not vite.
+        self.assertIsNone(park.kill_kind("npx --package vite prettier ."))
+
+    def test_python_dash_m_is_read_through(self):
+        self.assertEqual(park.kill_kind("python3 -m uvicorn app:api"),
+                         "dev-server")
+
+    def test_test_browsers(self):
+        self.assertEqual(park.kill_kind("/x/Chrome for Testing/chrome --port"),
+                         "test-browser")
+        self.assertEqual(park.kill_kind("node /x/.bin/agent-browser"),
+                         "test-browser")
+
+    def test_is_claude_matches_the_program_not_the_path(self):
+        self.assertTrue(park.is_claude("claude --resume abc"))
+        self.assertTrue(park.is_claude("/opt/homebrew/bin/claude"))
+        for cmd in ("vim /tmp/claude", "tail -f /var/log/claude",
+                    "grep claude ~/.zshrc"):
+            self.assertFalse(park.is_claude(cmd), cmd)
+
+
+class TestClassify(unittest.TestCase):
+    def test_subagent_claude_is_not_a_root_session(self):
+        procs = [proc(100, "claude --resume a"), proc(200, "claude -p sub", 100)]
+        table = {100: {"ppid": 1, "rss": 0, "cmd": "claude"},
+                 200: {"ppid": 100, "rss": 0, "cmd": "claude"}}
+        claude, dev, browser = park.classify(procs, table)
+        self.assertEqual([p["pid"] for p in claude], [100])
+
+    def test_grandchild_claude_is_not_a_root_session(self):
+        procs = [proc(100, "claude --resume a"), proc(300, "claude -p sub", 200)]
+        table = {100: {"ppid": 1, "rss": 0, "cmd": "claude"},
+                 200: {"ppid": 100, "rss": 0, "cmd": "sh"},
+                 300: {"ppid": 200, "rss": 0, "cmd": "claude"}}
+        claude, _, _ = park.classify(procs, table)
+        self.assertEqual([p["pid"] for p in claude], [100])
+
+    def test_two_unrelated_sessions_both_count(self):
+        procs = [proc(100, "claude --resume a"), proc(400, "claude --resume b")]
+        table = {100: {"ppid": 1, "rss": 0, "cmd": "claude"},
+                 400: {"ppid": 1, "rss": 0, "cmd": "claude"}}
+        claude, _, _ = park.classify(procs, table)
+        self.assertEqual(sorted(p["pid"] for p in claude), [100, 400])
+
+    def test_cycle_in_the_process_table_does_not_hang(self):
+        procs = [proc(100, "claude a"), proc(200, "claude b", 100)]
+        table = {100: {"ppid": 200, "rss": 0, "cmd": "claude"},
+                 200: {"ppid": 100, "rss": 0, "cmd": "claude"}}
+        park.classify(procs, table)      # must terminate
+
+
+class TestBusyVerdict(unittest.TestCase):
+    """The gate Rule #1 rests on."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def transcript(self, age_seconds):
+        p = Path(self.dir.name) / f"t{age_seconds}.jsonl"
+        p.write_text("{}\n")
+        when = time.time() - age_seconds
+        os.utime(p, (when, when))
+        return {"transcript": str(p)}
+
+    def test_busy_pill_with_a_live_transcript_refuses(self):
+        stale, why = park.busy_verdict("Running", [self.transcript(5)])
+        self.assertFalse(stale)
+        self.assertIn("turn in flight", why)
+
+    def test_busy_pill_gone_quiet_is_treated_as_stale(self):
+        stale, why = park.busy_verdict(
+            "Running", [self.transcript(park.STALE_PILL_SECONDS + 60)])
+        self.assertTrue(stale)
+        self.assertIsNone(why)
+
+    def test_no_pill_but_a_live_transcript_still_refuses(self):
+        # A session blocked on a slow tool call has no pill and near-zero CPU;
+        # the transcript is the only signal left.
+        stale, why = park.busy_verdict("", [self.transcript(3)])
+        self.assertIn("recent transcript", why)
+
+    def test_no_pill_and_a_quiet_transcript_parks(self):
+        stale, why = park.busy_verdict("", [self.transcript(3600)])
+        self.assertIsNone(why)
+
+    def test_the_busiest_tab_decides_for_the_whole_workspace(self):
+        sessions = [self.transcript(3600), self.transcript(2)]
+        _, why = park.busy_verdict("", sessions)
+        self.assertIsNotNone(why)
+
+    def test_a_missing_transcript_does_not_read_as_busy(self):
+        _, why = park.busy_verdict("", [{"transcript": "/nope/gone.jsonl"}])
+        self.assertIsNone(why)
+
+    def test_every_busy_state_is_honoured(self):
+        for state in park.BUSY_STATES:
+            _, why = park.busy_verdict(state.title(), [self.transcript(5)])
+            self.assertIsNotNone(why, state)
+
+
+class TestResumeCommand(unittest.TestCase):
+    SID = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"
+
+    def test_session_id_is_read_from_both_spellings(self):
+        self.assertEqual(park.argv_session_id(f"claude --resume {self.SID}"),
+                         self.SID)
+        self.assertEqual(park.argv_session_id(f"claude --session-id {self.SID}"),
+                         self.SID)
+        self.assertEqual(park.argv_session_id(f"claude --resume='{self.SID}'"),
+                         self.SID)
+
+    def test_uppercase_session_id_is_still_seen(self):
+        # SESSION_ID_RE accepts A-F, so a lowercase-only scan here made an
+        # uppercase id invisible to unpark's already-running guard — and two
+        # processes on one transcript corrupt it.
+        up = self.SID.upper()
+        self.assertEqual(park.argv_session_id(f"claude --resume {up}"), up)
+
+    def test_no_session_id(self):
+        self.assertIsNone(park.argv_session_id("claude --model opus"))
+
+    def test_flags_survive_the_round_trip(self):
+        cmd = park.command_from_argv(
+            f"claude --resume {self.SID} --dangerously-skip-permissions "
+            "--model opus", self.SID, "/tmp/x")
+        self.assertIn("--dangerously-skip-permissions", cmd)
+        self.assertIn("--model opus", cmd)
+
+    def test_flag_values_from_argv_cannot_inject(self):
+        # argv belongs to the process; the result is handed to /bin/sh.
+        cmd = park.command_from_argv(
+            "claude --model ;curl|sh", self.SID, "/tmp/x")
+        self.assertNotIn("--model ;curl|sh", cmd)
+        self.assertIn("';curl|sh'", cmd)
+
+    def test_cwd_with_spaces_is_quoted(self):
+        cmd = park.command_from_argv("claude", self.SID, "/tmp/my repo")
+        self.assertIn("'/tmp/my repo'", cmd)
+
+    def test_flags_that_swallow_spaces_are_dropped(self):
+        # ps joins argv with spaces, so --settings JSON cannot be split back.
+        cmd = park.command_from_argv(
+            'claude --settings {"a": 1} --verbose', self.SID, "/tmp/x")
+        self.assertNotIn("--settings", cmd)
+        self.assertIn("--verbose", cmd)
+
+
+class TestWithShim(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.shim = Path(self.dir.name) / "claude-shim"
+        self.shim.write_text("#!/bin/sh\n")
+        self.shim.chmod(0o755)
+        old = os.environ.get("CMUX_CLAUDE_WRAPPER_SHIM")
+        os.environ["CMUX_CLAUDE_WRAPPER_SHIM"] = str(self.shim)
+        self.addCleanup(lambda: os.environ.__setitem__(
+            "CMUX_CLAUDE_WRAPPER_SHIM", old) if old
+            else os.environ.pop("CMUX_CLAUDE_WRAPPER_SHIM", None))
+
+    def test_only_the_command_position_is_rewritten(self):
+        out = park.with_shim("cd /home/me/projects/claude && claude --resume x")
+        self.assertIn("cd /home/me/projects/claude &&", out)
+        self.assertIn(str(self.shim), out)
+
+    def test_no_shim_leaves_the_command_alone(self):
+        os.environ.pop("CMUX_CLAUDE_WRAPPER_SHIM")
+        self.assertEqual(park.with_shim("cd /x && claude -r y"),
+                         "cd /x && claude -r y")
+
+
+class TestLedgerPath(unittest.TestCase):
+    def test_traversal_is_refused(self):
+        for bad in ("../settings", "/etc/passwd", "a/b", ""):
+            with self.assertRaises(SystemExit, msg=bad):
+                park.ledger_path(bad)
+
+    def test_a_normal_id_is_accepted(self):
+        self.assertEqual(park.ledger_path("ws-12.ab_C").name, "ws-12.ab_C.json")
+
+
+class TestProcessLiveness(unittest.TestCase):
+    """Real processes: the zombie case is why this cannot be faked."""
+
+    def spawn(self):
+        p = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"])
+        self.addCleanup(self.reap, p)
+        return p
+
+    def reap(self, p):
+        if p.poll() is None:
+            p.kill()
+        p.wait()
+
+    def test_a_live_process_is_running(self):
+        p = self.spawn()
+        self.assertEqual([x["pid"] for x in park.still_running([proc(p.pid, "x")])],
+                         [p.pid])
+
+    def test_a_zombie_is_not_running(self):
+        # kill(pid, 0) succeeds for a zombie, which is exactly the trap: park
+        # kills children before parents, so unreaped corpses read as survivors
+        # and used to trigger the rollback that deletes the ledger.
+        p = self.spawn()
+        p.send_signal(signal.SIGKILL)
+        for _ in range(100):                    # wait for it to become a corpse
+            if p.poll() is None and os.path.exists(f"/proc/{p.pid}") is False:
+                pass
+            out = subprocess.run(["ps", "-o", "state=", "-p", str(p.pid)],
+                                 capture_output=True, text=True).stdout.strip()
+            if out.startswith("Z"):
+                break
+            time.sleep(0.02)
+        else:
+            p.wait()
+            self.skipTest("the corpse was reaped before it could be observed")
+        self.assertEqual(park.still_running([proc(p.pid, "x")]), [])
+
+    def test_an_absent_pid_is_not_running(self):
+        self.assertEqual(park.still_running([proc(999999, "gone")]), [])
+
+    def test_wait_gone_returns_as_soon_as_they_die(self):
+        p = self.spawn()
+        p.send_signal(signal.SIGKILL)
+        started = time.time()
+        left = park.wait_gone([proc(p.pid, "x")], timeout=5.0)
+        self.assertEqual(left, [])
+        self.assertLess(time.time() - started, 2.0)   # not the full budget
+
+    def test_wait_gone_gives_up_and_reports_the_survivor(self):
+        p = self.spawn()
+        left = park.wait_gone([proc(p.pid, "x")], timeout=0.4)
+        self.assertEqual([x["pid"] for x in left], [p.pid])
+
+
+class TestSelfPids(unittest.TestCase):
+    def test_our_own_ancestry_is_in_the_chain(self):
+        chain = park.self_pids()
+        self.assertIn(os.getpid(), chain)
+        self.assertIn(os.getppid(), chain)
+
+    def test_a_cycle_in_the_table_does_not_hang(self):
+        me = os.getpid()
+        park.self_pids({me: {"ppid": me}})
+
+
+class TestPromptGuards(unittest.TestCase):
+    """The two reads that stand between park and something the user typed."""
+
+    BOX = "─" * 40
+
+    def screen(self, lines):
+        return lambda ws, surface=None: lines
+
+    def test_a_fenced_draft_is_found(self):
+        park.read_screen = self.screen([self.BOX, "> half a thought"])
+        self.addCleanup(self.restore)
+        self.assertEqual(park.unsent_input("ws"), "half a thought")
+
+    def test_an_empty_input_box_is_not_a_draft(self):
+        park.read_screen = self.screen([self.BOX, ">"])
+        self.addCleanup(self.restore)
+        self.assertEqual(park.unsent_input("ws"), "")
+
+    def test_a_shell_prompt_is_not_a_draft(self):
+        park.read_screen = self.screen(["~/Sites/foo ❯ ls -la"])
+        self.addCleanup(self.restore)
+        self.assertEqual(park.unsent_input("ws"), "")
+
+    def test_an_unreadable_screen_is_not_no_draft(self):
+        park.read_screen = lambda ws, surface=None: None
+        self.addCleanup(self.restore)
+        self.assertIsNone(park.unsent_input("ws"))
+
+    def restore(self):
+        import importlib
+        importlib.reload(park)
+
+
+class TestClearPrefill(unittest.TestCase):
+    def setUp(self):
+        self.sent = []
+        self.real_do, self.real_line = park.cmux_do, park.prompt_line
+        park.cmux_do = lambda *a: self.sent.append(a) or True
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        park.cmux_do, park.prompt_line = self.real_do, self.real_line
+
+    def test_our_own_prefill_is_cleared(self):
+        park.prompt_line = lambda ws, s=None: f"~/x ❯ {park.PREFILL}"
+        self.assertTrue(park.clear_prefill("ws", [{"surface": "s1"}]))
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("ctrl+u", self.sent[0])
+
+    def test_a_line_the_user_typed_into_is_left_alone(self):
+        park.prompt_line = lambda ws, s=None: f"~/x ❯ {park.PREFILL}rm -rf"
+        self.assertTrue(park.clear_prefill("ws", [{"surface": "s1"}]))
+        self.assertEqual(self.sent, [])
+
+    def test_an_unrelated_line_is_left_alone(self):
+        park.prompt_line = lambda ws, s=None: "~/x ❯ git status"
+        park.clear_prefill("ws", [{"surface": "s1"}])
+        self.assertEqual(self.sent, [])
+
+    def test_an_unreadable_prompt_reports_failure(self):
+        park.prompt_line = lambda ws, s=None: None
+        self.assertFalse(park.clear_prefill("ws", [{"surface": "s1"}]))
+        self.assertEqual(self.sent, [])
+
+
+class TestFormatting(unittest.TestCase):
+    def test_ago_reads_both_timestamp_dialects(self):
+        # Ours is +00:00, cmux's ends in Z, and 3.9 rejects the Z form.
+        now = datetime.now(timezone.utc)
+        self.assertEqual(park.ago((now - timedelta(minutes=5)).isoformat()),
+                         "5m ago")
+        z = (now - timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+        self.assertEqual(park.ago(z), "3h ago")
+        self.assertEqual(park.ago((now - timedelta(days=2)).isoformat()),
+                         "2d ago")
+
+    def test_ago_survives_junk(self):
+        for bad in (None, "", "yesterday", 17):
+            self.assertEqual(park.ago(bad), "?")
+
+    def test_human(self):
+        self.assertEqual(park.human(500 * 1024 * 1024), "500 MB")
+        self.assertEqual(park.human(2 * 1024 ** 3), "2.0 GB")
+
+    def test_bar_never_hides_a_nonzero_workspace(self):
+        self.assertEqual(park.bar(0, 100, width=10, plain=True), "-" * 10)
+        self.assertTrue(park.bar(1, 10 ** 9, width=10, plain=True).startswith("="))
+        self.assertEqual(park.bar(100, 100, width=10, plain=True), "=" * 10)
+
+    def test_bar_with_no_peak(self):
+        self.assertEqual(park.bar(5, 0, width=4), "    ")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

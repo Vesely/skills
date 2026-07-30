@@ -421,8 +421,14 @@ def argv_session_id(cmd):
     sitting in plain sight, and `unpark`'s "already running" guard could not
     see them at all.
     """
-    m = re.search(r"--(?:resume|session-id)['\"\s]+([0-9a-f]{8}-[0-9a-f-]{27})",
-                  cmd)
+    # Case-insensitive and `=`-tolerant on purpose: SESSION_ID_RE accepts
+    # A-F, so a lowercase-only scan here made an uppercase id invisible to
+    # `unpark`'s "already running" guard — and that guard is the only thing
+    # standing between a double resume and two processes appending to one
+    # transcript.
+    m = re.search(
+        r"--(?:resume|session-id)['\"\s=]+([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})",
+        cmd)
     return m.group(1) if m else None
 
 
