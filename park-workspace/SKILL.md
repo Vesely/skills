@@ -258,9 +258,13 @@ workspace's prompt, so resuming is walking into the workspace and pressing
 enter. Enter runs the real unpark path — clearing the pill, the colour and the
 ledger — rather than a bare resume line.
 
-Run there, `unpark` detects it is inside the workspace it is resuming
-(`CMUX_WORKSPACE_ID`) and `exec`s the resume command instead of sending
-keystrokes to its own surface, which would race the shell.
+Run there, `unpark` detects it is inside the tab it is resuming and `exec`s the
+resume command instead of sending keystrokes to its own surface, which would
+race the shell. The match is on `CMUX_SURFACE_ID` against the session's
+recorded surface — but a **rebuilt** workspace has no recorded surfaces, and
+matching on the surface alone meant the resume was typed into the very tab
+running park. With no surface to compare, `CMUX_WORKSPACE_ID` against the
+workspace is the same statement, so that is the fallback.
 
 Two traps in reconstructing that command:
 

@@ -55,6 +55,12 @@ TICK_BUSY_MS, TICK_IDLE_MS, TICK_HIDDEN_MS = 120, 400, 2000
 # treated as stale. Long on purpose: one tool call can legitimately write
 # nothing while it runs.
 STALE_PILL_SECONDS = 600.0
+# A ledger claim lock is held for milliseconds; older than this it belongs to a
+# park that was killed mid-write, and reclaiming it is the only way back.
+LOCK_STALE_SECONDS = 60.0
+# How stale cmd_park lets its process snapshot get before re-taking it, so a
+# session started during a long batch cannot be missed by classify().
+SNAPSHOT_MAX_AGE = 5.0
 
 # A turn is in flight -> never park. Anything else is fair game.
 BUSY_STATES = {"running", "working", "thinking", "compacting"}
@@ -877,6 +883,17 @@ def write_entry(path, entry, claim=False):
         # O_EXCL on the FINAL path would leave a half-written .json if this is
         # interrupted; claim a lock file instead and rename the finished blob in.
         lock = path.with_suffix(".json.lock")
+        # The lock is held for the few milliseconds between creating it and
+        # renaming it into place, so anything older is a corpse — a park that
+        # was SIGKILLed mid-write. Left alone it wedges the workspace for good:
+        # every later park reads "already parked" while no entry exists, so
+        # unpark and forget both answer "not parked" and nothing short of `rm`
+        # gets it back.
+        try:
+            if time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS:
+                lock.unlink(missing_ok=True)
+        except OSError:
+            pass
         try:
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
@@ -1552,14 +1569,20 @@ def park_one(w, by_ws, table, dry=False, force=False, brutal=False,
     # is an unreadable escaped one-liner, and this way enter also clears the
     # pill and the ledger. One workspace parks and resumes as a unit, so it does
     # not matter which tab you land on.
-    for s in sessions:
-        send_text(PREFILL, w["id"], s.get("surface"))
+    if not all(send_text(PREFILL, w["id"], s.get("surface")) for s in sessions):
+        res["notes"].append("the resume command could not be typed at every "
+                            "prompt — unpark it by name (`park unpark <ref>`)")
 
-    cmux_do("set-status", PILL_KEY, f"Parked · {human(freed)} freed",
-            "--icon", "snowflake", "--color", "#5AC8FA", "--priority", "90",
-            "--workspace", w["id"])
-    cmux_do("workspace-action", "--action", "set-color", "--color",
-            PARKED_COLOR, "--workspace", w["id"])
+    # These are how a parked workspace announces itself in the sidebar. Losing
+    # them silently is how a workspace ends up parked and indistinguishable
+    # from a live one, so a failure is reported rather than assumed away.
+    if not cmux_do("set-status", PILL_KEY, f"Parked · {human(freed)} freed",
+                   "--icon", "snowflake", "--color", "#5AC8FA",
+                   "--priority", "90", "--workspace", w["id"]):
+        res["notes"].append("cmux would not set the parked pill")
+    if not cmux_do("workspace-action", "--action", "set-color", "--color",
+                   PARKED_COLOR, "--workspace", w["id"]):
+        res["notes"].append("cmux would not dim the workspace colour")
     if pin_title(w, title):
         # Recorded so unpark clears only a name we set, never the user's own.
         entry["pinned_title"] = True
@@ -1740,17 +1763,25 @@ def unpark_one(w, allow_exec=False):
                       f"{len(e['sessions'])} still parked (ledger at {path})")
         return res
 
-    for s in e["sessions"]:
+    for idx, s in enumerate(e["sessions"], 1):
         surface = s.get("surface", "")
-        if allow_exec and surface and os.environ.get("CMUX_SURFACE_ID") == surface:
+        # A rebuilt workspace has no recorded surfaces, so matching on the
+        # surface id alone left `here` unset and the resume was TYPED into the
+        # very tab running park — racing the shell that was about to get the
+        # command anyway. With no surface to match, being in the workspace is
+        # the same statement.
+        if allow_exec and here is None and (
+                os.environ.get("CMUX_SURFACE_ID") == surface if surface
+                else os.environ.get("CMUX_WORKSPACE_ID") == w["id"]):
             here = s
             continue
         # After a rebuild the surfaces are gone and every session shares the
-        # workspace's single one, so only the first can actually be resumed.
+        # workspace's single one, so only the first can actually be resumed —
+        # whether that first one was sent to or claimed by the exec above.
         # Say what the others need rather than dropping them on the floor.
-        if not surface and sent:
+        if not surface and (sent or here):
             res["notes"].append(
-                f"tab {sent + 1} needs a new agent tab; resume it with: "
+                f"tab {idx} needs a new agent tab; resume it with: "
                 + resume_command_for(s))
             continue
         # Park pre-filled a command at this prompt; clear the line first or the
@@ -1816,7 +1847,8 @@ def cmd_park(argv):
         confirm_kill_anyway(targets)
 
     with Spinner("checking what is safe to park…"):
-        by_ws = attribute(all_workspaces())
+        spaces = all_workspaces()
+        by_ws = attribute(spaces)
         table = ps_table()
         # One CPU window for the whole batch. It is the corroborating gate, not
         # the deciding one — every workspace still gets its own fresh pill and
@@ -1824,9 +1856,17 @@ def cmd_park(argv):
         # few-seconds-old reading across the batch trades nothing for turning
         # `park park window:2` from half a minute of sleeping into one wait.
         snaps = cpu_snapshots()
+    taken = time.time()
 
     total, done = 0, 0
     for w in targets:
+        # The process snapshot ages as the batch runs, and a session started
+        # after it was taken is invisible to classify() — park would kill the
+        # rest, write the ledger and report the workspace parked with a live
+        # claude still in it. Re-attributing reuses `spaces`, so it costs a ps
+        # sweep rather than another round of cmux round-trips.
+        if time.time() - taken > SNAPSHOT_MAX_AGE:
+            by_ws, table, taken = attribute(spaces), ps_table(), time.time()
         r = park_one(w, by_ws, table, dry=dry, force=force, brutal=brutal,
                      snaps=snaps)
         mark = ("would park" if dry else "❄") if r["ok"] else "skip"
@@ -1968,14 +2008,19 @@ def cmd_rebuild(argv):
         # the dead workspace and `park unpark` can never find it again — which
         # would make the recovery path the out-of-cmux ledger exists for a
         # dead end.
-        fresh = [w for w in all_workspaces() if w["id"] not in before]
-        exact = [w for w in fresh if w.get("current_directory") == e["cwd"]]
-        fresh = exact or fresh
-        if len(fresh) != 1:
+        appeared = [w for w in all_workspaces() if w["id"] not in before]
+        exact = [w for w in appeared if w.get("current_directory") == e["cwd"]]
+        candidates = exact or appeared
+        # Everything that appeared is accounted for now, whichever branch comes
+        # next. Leaving any of it out of `before` would make the NEXT rebuild
+        # see it again as well as its own, so a single ambiguity used to poison
+        # every remaining entry in the run.
+        before.update(w["id"] for w in appeared)
+        if len(candidates) != 1:
             print(f"  rebuilt  {title[:44]} — but could not identify the new "
                   f"workspace; entry left under {old_id}")
             continue
-        new = fresh[0]
+        new = candidates[0]
         # The surfaces died with the old workspace, so their ids would target
         # nothing and unpark would silently type into the void. A rebuilt
         # workspace has exactly one surface; drop the ids and let unpark use it.
@@ -1986,7 +2031,6 @@ def cmd_rebuild(argv):
         write_entry(ledger_path(new["id"]), e)
         if new["id"] != old_id:
             ledger_path(old_id).unlink(missing_ok=True)
-        before.add(new["id"])
         print(f"  rebuilt  {title[:44]}  → {new['ref']}")
     print()
 

@@ -230,6 +230,51 @@ class TestLedgerPath(unittest.TestCase):
         self.assertEqual(park.ledger_path("ws-12.ab_C").name, "ws-12.ab_C.json")
 
 
+class TestLedgerClaim(unittest.TestCase):
+    """The claim lock is the "already parked" guard; a leaked one wedges it."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.real = park.LEDGER
+        park.LEDGER = Path(self.dir.name)
+        self.addCleanup(lambda: setattr(park, "LEDGER", self.real))
+
+    def test_a_claim_creates_the_entry_and_removes_the_lock(self):
+        p = park.ledger_path("ws-one")
+        self.assertTrue(park.write_entry(p, {"a": 1}, claim=True))
+        self.assertTrue(p.exists())
+        self.assertFalse(p.with_suffix(".json.lock").exists())
+
+    def test_a_second_claim_loses(self):
+        p = park.ledger_path("ws-one")
+        park.write_entry(p, {"a": 1}, claim=True)
+        self.assertFalse(park.write_entry(p, {"a": 2}, claim=True))
+
+    def test_a_live_lock_blocks(self):
+        p = park.ledger_path("ws-one")
+        p.with_suffix(".json.lock").write_text("")
+        self.assertFalse(park.write_entry(p, {"a": 1}, claim=True))
+
+    def test_a_lock_left_by_a_killed_park_is_reclaimed(self):
+        # Without this the workspace is wedged for good: every park reads
+        # "already parked" while no entry exists, so unpark and forget both
+        # answer "not parked".
+        p = park.ledger_path("ws-one")
+        lock = p.with_suffix(".json.lock")
+        lock.write_text("")
+        old = time.time() - park.LOCK_STALE_SECONDS - 60
+        os.utime(lock, (old, old))
+        self.assertTrue(park.write_entry(p, {"a": 1}, claim=True))
+        self.assertTrue(p.exists())
+
+    def test_entries_are_not_world_readable(self):
+        # They record cwds, branches and the user's last prompt.
+        p = park.ledger_path("ws-one")
+        park.write_entry(p, {"a": 1}, claim=True)
+        self.assertEqual(p.stat().st_mode & 0o077, 0)
+
+
 class TestProcessLiveness(unittest.TestCase):
     """Real processes: the zombie case is why this cannot be faked."""
 
