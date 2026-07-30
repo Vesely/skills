@@ -563,13 +563,12 @@ def session_id_of(pid, cwd=None):
     return best[0].stem, str(best[0]), "scan"
 
 
-def cpu_sample(pids, seconds=2.0):
-    """Peak summed %CPU across two samples — corroborates the status pill.
+def cpu_snapshots(seconds=2.0):
+    """Two system-wide %CPU readings, `seconds` apart.
 
-    NOT a delta. macOS `%cpu` is already a decaying average, so subtracting two
-    samples measures acceleration: a session pinned at 100% produced deltas of
-    -4.1, +3.5, -42.1 — every one of them under the 15% threshold, so the gate
-    that exists to catch a busy session waved it through.
+    Split out from `cpu_sample` so a batch can share one window: the reading is
+    system-wide anyway, and it corroborates ten workspaces exactly as well as
+    one — a ten-target park used to pay for ten separate 2 s waits.
     """
     def snap():
         r = subprocess.run(["ps", "-Ao", "pid=,%cpu="], capture_output=True,
@@ -586,6 +585,18 @@ def cpu_sample(pids, seconds=2.0):
     a = snap()
     time.sleep(seconds)
     b = snap()
+    return a, b
+
+
+def cpu_sample(pids, seconds=2.0, snaps=None):
+    """Peak summed %CPU across two samples — corroborates the status pill.
+
+    NOT a delta. macOS `%cpu` is already a decaying average, so subtracting two
+    samples measures acceleration: a session pinned at 100% produced deltas of
+    -4.1, +3.5, -42.1 — every one of them under the 15% threshold, so the gate
+    that exists to catch a busy session waved it through.
+    """
+    a, b = snaps if snaps else cpu_snapshots(seconds)
     return max(sum(a.get(p, 0.0) for p in pids),
                sum(b.get(p, 0.0) for p in pids))
 
@@ -766,6 +777,21 @@ def still_running(procs):
                 pass
     return [p for p in procs
             if not states.get(p["pid"], "Z").startswith("Z")]
+
+
+def wait_gone(procs, timeout, step=0.15):
+    """Poll until these processes are gone, up to `timeout`. Returns the rest.
+
+    A fixed sleep charged every park its worst case. A claude session and its
+    children normally go in well under 200 ms, and this wait was the second
+    biggest slice of a multi-workspace park after the CPU window.
+    """
+    left = still_running(procs)
+    deadline = time.time() + timeout
+    while left and time.time() < deadline:
+        time.sleep(step)
+        left = still_running(left)
+    return left
 
 
 # --- Ledger ------------------------------------------------------------------
@@ -1334,7 +1360,8 @@ def busy_verdict(state, sessions):
     return False, None
 
 
-def park_one(w, by_ws, table, dry=False, force=False, brutal=False):
+def park_one(w, by_ws, table, dry=False, force=False, brutal=False,
+             snaps=None):
     """Park one workspace. Returns a result dict; prints nothing.
 
     Silence matters: the picker calls this from a worker thread while curses
@@ -1386,7 +1413,8 @@ def park_one(w, by_ws, table, dry=False, force=False, brutal=False):
                 return res
 
     state = workspace_status(w["id"]).get("claude_code", "")
-    if cpu_sample([p["pid"] for p in claude]) > 15.0 and not (force or brutal):
+    if (cpu_sample([p["pid"] for p in claude], snaps=snaps) > 15.0
+            and not (force or brutal)):
         res["msg"] = "busy (cpu)"
         return res
 
@@ -1482,13 +1510,10 @@ def park_one(w, by_ws, table, dry=False, force=False, brutal=False):
         res["notes"].append(f"{stale} process(es) vanished before the kill")
     for p in victims:
         kill_tree(p["pid"])
-    time.sleep(1.5)
-    survivors = still_running(victims)
+    survivors = wait_gone(victims, 1.5)
     for p in survivors:                     # escalate rather than report a lie
         kill_tree(p["pid"], sig=signal.SIGKILL)
-    if survivors:
-        time.sleep(0.5)
-    stubborn = still_running(survivors)
+    stubborn = wait_gone(survivors, 0.5) if survivors else []
     if stubborn and len(still_running(claude)) == len(claude):
         # Nothing irreplaceable is gone yet, so a clean rollback is the honest
         # answer: the ledger would otherwise claim parked while the session is
@@ -1787,10 +1812,17 @@ def cmd_park(argv):
     with Spinner("checking what is safe to park…"):
         by_ws = attribute(all_workspaces())
         table = ps_table()
+        # One CPU window for the whole batch. It is the corroborating gate, not
+        # the deciding one — every workspace still gets its own fresh pill and
+        # transcript verdict, re-run immediately before the kill — so sharing a
+        # few-seconds-old reading across the batch trades nothing for turning
+        # `park park window:2` from half a minute of sleeping into one wait.
+        snaps = cpu_snapshots()
 
     total, done = 0, 0
     for w in targets:
-        r = park_one(w, by_ws, table, dry=dry, force=force, brutal=brutal)
+        r = park_one(w, by_ws, table, dry=dry, force=force, brutal=brutal,
+                     snaps=snaps)
         mark = ("would park" if dry else "❄") if r["ok"] else "skip"
         print(f"  {mark:<11} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
         for n in r["notes"]:
@@ -1871,7 +1903,7 @@ def cmd_doctor(argv):
                 issues.append("session id came from a transcript scan — "
                               "verify the conversation after unpark")
         # The risk park guards against materialises WHILE parked, over days,
-        # not during the 1.5s kill window park_one compares across.
+        # not during the moment park_one compares across.
         if e.get("worktree") and worktree_fingerprint(e.get("cwd")) != e["worktree"]:
             issues.append("git checkout changed since parking")
         live = spaces.get(e.get("workspace_id"))
