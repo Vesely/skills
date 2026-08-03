@@ -401,6 +401,24 @@ class TestClosedWorkspaces(unittest.TestCase):
                          ["WS-1", "WS-2"])
 
 
+class TestBarePrompt(unittest.TestCase):
+    """Guards `repaint` before it types into someone's shell."""
+
+    def test_a_bare_prompt_is_safe_to_type_into(self):
+        for line in ("❯", "~/Sites/x on main ❯", "$", "davidvesely% ", "➜  "):
+            self.assertTrue(park.bare_prompt(line), line)
+
+    def test_a_prompt_with_something_typed_is_not(self):
+        for line in ("❯ git status", "❯ park unpark .", "$ rm -rf /"):
+            self.assertFalse(park.bare_prompt(line), line)
+
+    def test_an_unreadable_screen_is_not_bare(self):
+        # prompt_line returns None when the surface cannot be read; typing
+        # blind there is exactly what the guard exists to stop.
+        self.assertFalse(park.bare_prompt(None))
+        self.assertFalse(park.bare_prompt(""))
+
+
 class TestProcessLiveness(unittest.TestCase):
     """Real processes: the zombie case is why this cannot be faked."""
 

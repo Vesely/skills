@@ -2221,6 +2221,76 @@ def cmd_rekey(argv):
         print()
 
 
+PROMPT_GLYPHS = "❯>$%#»➜"
+
+
+def bare_prompt(line):
+    """Is this a shell prompt with nothing typed after it?
+
+    Used before typing anything into a surface. Refusing when unsure is the
+    point: appending to a half-written command is silent and the user's text
+    is the only copy.
+    """
+    return bool(line) and line.rstrip()[-1:] in PROMPT_GLYPHS
+
+
+def cmd_repaint(argv):
+    """Re-assert the parked presentation cmux forgot.
+
+    The ledger survives anything; the pill, the dimmed colour and the typed
+    `park unpark .` do not — they live in cmux and its terminal buffers, and a
+    restart takes all three. Measured right after a cmux update: 0 of 44 parked
+    workspaces still showed any of them, so the whole fleet read as ordinary
+    empty workspaces and the only way to tell what was parked was `park ls`.
+    That is also how a parked workspace gets mistaken for a lost session and
+    "restored" by hand behind park's back.
+
+    Never automatic — like everything else here, it runs when asked.
+    """
+    dry = "--dry-run" in argv
+    with Spinner("checking what the parked workspaces still show…"):
+        spaces = {w["id"]: w for w in all_workspaces()}
+        todo = [(e, spaces[e["workspace_id"]]) for e in read_ledger()
+                if e.get("workspace_id") in spaces]
+    if not todo:
+        print("  nothing parked in an open workspace\n")
+        return
+
+    marks = typed = skipped = 0
+    for e, w in todo:
+        line = prompt_line(w["id"])
+        if dry:
+            state = ("prefill present" if line and line.endswith(PREFILL)
+                     else "would retype prefill" if bare_prompt(line)
+                     else "prompt busy — pill/colour only")
+            print(f"  would repaint  {w['ref']:<13} "
+                  f"{(e.get('title') or '')[:34]:<36} {state}")
+            marks += 1
+            continue
+        ok = cmux_do("set-status", PILL_KEY,
+                     f"Parked · {human(e.get('freed_bytes') or 0)} freed",
+                     "--icon", "snowflake", "--color", "#5AC8FA",
+                     "--priority", "90", "--workspace", w["id"])
+        ok &= cmux_do("workspace-action", "--action", "set-color",
+                      "--color", PARKED_COLOR, "--workspace", w["id"])
+        marks += bool(ok)
+        if line and line.endswith(PREFILL):
+            continue                       # already there, leave it alone
+        if not bare_prompt(line):
+            # Something is typed there, or the screen would not read. Either
+            # way it is not ours to append to.
+            skipped += 1
+            print(f"  prompt busy    {w['ref']:<13} "
+                  f"{(e.get('title') or '')[:34]:<36} left the line alone")
+            continue
+        typed += send_text(PREFILL, w["id"])
+    if dry:
+        print(f"\n  {marks} workspace(s) would be repainted\n")
+        return
+    print(f"\n  repainted {marks}/{len(todo)}, retyped {typed} prefill(s)"
+          + (f", left {skipped} prompt(s) alone" if skipped else "") + "\n")
+
+
 # --- Interactive picker ------------------------------------------------------
 def focus_workspace(row, ws_by_ref):
     """Jump to a workspace without leaving the picker."""
@@ -2642,6 +2712,8 @@ USAGE = """park — free RAM from idle cmux workspaces without closing them
   park show <target>           dump the ledger entry
   park forget <target>         drop a stale ledger entry without resuming
   park doctor                  verify every parked entry is still restorable
+  park repaint                 put back the pill, colour and prefill a cmux
+                               restart wiped (--dry-run)
   park rekey                   re-point entries after cmux regenerated its
                                workspace uuids (--dry-run). Run BEFORE rebuild
   park rebuild                 recreate workspaces cmux lost (--dry-run)
@@ -2664,7 +2736,7 @@ KNOWN_FLAGS = {
     "park": ("--dry-run", "--force", "--kill-anyway"),
     "pick": (), "unpark": (), "resume": (), "show": (),
     "forget": (), "doctor": (), "rebuild": ("--dry-run", "--closed"),
-    "rekey": ("--dry-run",),
+    "rekey": ("--dry-run",), "repaint": ("--dry-run",),
 }
 
 
@@ -2690,7 +2762,7 @@ def main():
     table = {"ls": cmd_ls, "list": cmd_ls, "park": cmd_park, "pick": cmd_pick,
              "unpark": cmd_unpark, "resume": cmd_unpark, "show": cmd_show,
              "forget": cmd_forget, "doctor": cmd_doctor, "rebuild": cmd_rebuild,
-             "rekey": cmd_rekey}
+             "rekey": cmd_rekey, "repaint": cmd_repaint}
     if cmd not in table:
         die(f"unknown command '{cmd}'\n\n{USAGE}")
     # Unrecognised flags used to be filtered out silently alongside the real

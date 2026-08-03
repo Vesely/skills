@@ -38,6 +38,8 @@ park unpark <target>...    resume a parked workspace
 park show <target>         dump the ledger entry
 park forget <target>       drop a stale ledger entry without resuming
 park doctor                verify every parked entry is still restorable
+park repaint               put back the pill and prefill a cmux restart
+                           wiped   [--dry-run]
 park rekey                 re-point entries after cmux regenerated its
                            workspace uuids — run BEFORE rebuild   [--dry-run]
 park rebuild               recreate workspaces cmux lost   [--dry-run]
@@ -534,6 +536,26 @@ as the ledger entry holding the only record of it, and it left the pre-filled
 "not parked".
 
 ## Recovering from a cmux reset
+
+A restart wipes what lives in cmux, not what lives in the ledger. Measured
+across 44 parked workspaces right after a cmux update: the **pill** and the
+typed **`park unpark .`** were gone from every one of them (the prefill lived
+in the terminal buffer, which the new login shell replaced), while the dimmed
+**colour** and the pinned **title** survived — cmux persists those. The ledger
+itself was untouched: 44/44 restorable, uuids intact.
+
+That matters because a parked workspace with no pill and no prefill is
+indistinguishable from an ordinary empty one, which is how a parked session
+gets mistaken for a lost one and "restored" by hand behind park's back.
+
+```bash
+park repaint         # put the pill and the prefill back, from the ledger
+```
+
+It never types into a prompt that is not bare: a line with anything after the
+prompt glyph is left alone and reported, because appending to a half-written
+command is silent and the user's text is the only copy.
+
 
 ```bash
 park doctor          # is every parked entry still restorable?
