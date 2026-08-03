@@ -38,6 +38,8 @@ park unpark <target>...    resume a parked workspace
 park show <target>         dump the ledger entry
 park forget <target>       drop a stale ledger entry without resuming
 park doctor                verify every parked entry is still restorable
+park rekey                 re-point entries after cmux regenerated its
+                           workspace uuids — run BEFORE rebuild   [--dry-run]
 park rebuild               recreate workspaces cmux lost   [--dry-run]
 ```
 
@@ -534,9 +536,31 @@ as the ledger entry holding the only record of it, and it left the pre-filled
 ## Recovering from a cmux reset
 
 ```bash
-park doctor      # is every parked entry still restorable?
-park rebuild     # recreate workspaces cmux lost, from the ledger
+park doctor          # is every parked entry still restorable?
+park rekey           # workspaces came back under NEW uuids — re-point the entries
+park rebuild         # only for what rekey could not place: recreate from the ledger
 ```
+
+**Order matters, and getting it wrong duplicates the fleet.** The ledger is keyed
+by cmux workspace uuid, and a reset regenerates every one of them while the
+workspaces themselves come back. Every parked entry therefore orphans at once —
+which looks exactly like "cmux lost them" and made `rebuild` the obvious command.
+It is the wrong one: `rebuild` treats an orphan as gone and creates a **second**
+workspace beside each survivor. Run `rekey` first; `rebuild` is for what is
+genuinely missing.
+
+`rekey` matches on the workspace **title**, corroborated by the cwd — not the
+reverse, which was the first attempt and matched 23 of 44. `pin_title` freezes the
+name at park time precisely so it survives, and measured against a real 44-entry
+ledger every title still matched while 21 cwds did not: cmux records the repo
+**root** for an agent living in a worktree under it (19 cases), and a reset can
+point its per-panel cwd at a sibling worktree outright (2 cases). Title-keyed with
+a prefix-tolerant cwd check matches 44 of 44 and reports the disagreements instead
+of obeying them. What prevents a wrong adopt is **uniqueness**: the title must
+match exactly one workspace still up for adoption, and one already claimed by
+another entry or running a claude session is never adoptable. It also re-applies
+the pill and the colour, which the reset wiped. The typed prefill does not come
+back — it lived in the terminal buffer — so resume re-keyed workspaces by name.
 
 `doctor` flags a missing cwd (per tab, not just the workspace's), a missing
 transcript, a session that is already running, a corrupt ledger file, a session
