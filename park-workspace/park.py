@@ -55,6 +55,9 @@ TICK_BUSY_MS, TICK_IDLE_MS, TICK_HIDDEN_MS = 120, 400, 2000
 # treated as stale. Long on purpose: one tool call can legitimately write
 # nothing while it runs.
 STALE_PILL_SECONDS = 600.0
+# cmux writes its closed-item history with Core Data timestamps (epoch
+# 2001-01-01), so they need this added to become unix seconds.
+APPLE_EPOCH = 978307200
 # A ledger claim lock is held for milliseconds; older than this it belongs to a
 # park that was killed mid-write, and reclaiming it is the only way back.
 LOCK_STALE_SECONDS = 60.0
@@ -270,6 +273,39 @@ def workspace_status(ws_id):
         if m:
             status[m.group(1)] = m.group(2).strip()
     return status
+
+
+def closed_workspaces(base=None):
+    """workspace uuid -> when the user closed it, from cmux's own history.
+
+    "cmux lost this workspace" and "you closed it on purpose" are the same
+    thing to the ledger — both leave an entry naming a workspace that is not
+    there — and treating the second as the first makes `rebuild` resurrect
+    something the user deliberately shut. cmux records the answer; read it
+    rather than guess.
+
+    Timestamps are Core Data epoch (2001-01-01), returned as unix seconds.
+    Missing or unreadable history is not an error: it only means every orphan
+    keeps the older, vaguer message.
+    """
+    out = {}
+    base = base or Path.home() / "Library" / "Application Support" / "cmux"
+    for f in sorted(base.glob("closed-item-history*.json")):
+        try:
+            records = json.loads(f.read_text()).get("records", [])
+        except (OSError, ValueError):
+            continue
+        for r in records:
+            entry = (r.get("entry") or {}).get("workspace") or {}
+            inner = entry.get("_0") if isinstance(entry, dict) else None
+            ws_id = (inner or entry or {}).get("workspaceId")
+            when = r.get("closedAt")
+            if not ws_id or not isinstance(when, (int, float)):
+                continue
+            unix = when + APPLE_EPOCH
+            # Reopened and closed again: the latest close is the current truth.
+            out[ws_id] = max(out.get(ws_id, 0), unix)
+    return out
 
 
 def ps_table():
@@ -1927,6 +1963,7 @@ def cmd_doctor(argv):
         return
     spaces = {w["id"]: w for w in all_workspaces()}
     running = {argv_session_id(i["cmd"]) for i in ps_table().values()}
+    closed = closed_workspaces()
     bad = 0
     for e in entries:
         if e.get("__broken__"):
@@ -1954,10 +1991,20 @@ def cmd_doctor(argv):
             issues.append("git checkout changed since parking")
         live = spaces.get(e.get("workspace_id"))
         if not live:
-            # rekey first: after a reset the workspace is usually still there
-            # under a new uuid, and rebuild would make a second one beside it.
-            issues.append("workspace no longer open in cmux "
-                          "(try: park rekey, then park rebuild)")
+            # Two very different causes, one symptom. cmux knows which.
+            shut = closed.get(e.get("workspace_id"))
+            if shut:
+                issues.append(
+                    "workspace was closed "
+                    + ago(datetime.fromtimestamp(shut, timezone.utc)
+                          .isoformat())
+                    + " — not lost; drop the entry with: park forget")
+            else:
+                # rekey first: after a reset the workspace is usually still
+                # there under a new uuid, and rebuild would make a second one
+                # beside it.
+                issues.append("workspace no longer open in cmux "
+                              "(try: park rekey, then park rebuild)")
         # Refs are positional and shift as workspaces open and close, so the one
         # captured at park time may now name a different workspace.
         ref = live["ref"] if live else (e.get("workspace_id") or "?")[:13]
@@ -1981,6 +2028,27 @@ def cmd_rebuild(argv):
     if not lost:
         print("  nothing to rebuild — every parked workspace is still open\n")
         return
+
+    # A workspace the user closed on purpose is not a workspace cmux lost, and
+    # the ledger cannot tell them apart — both leave an entry pointing at
+    # nothing. Rebuilding the first kind resurrects something deliberately shut,
+    # which is worse than leaving the entry sitting there. cmux records which is
+    # which; skipping needs no flag, un-skipping does.
+    if "--closed" not in argv:
+        closed = closed_workspaces()
+        keep = []
+        for e in lost:
+            shut = closed.get(e.get("workspace_id"))
+            if shut:
+                when = ago(datetime.fromtimestamp(shut, timezone.utc).isoformat())
+                print(f"  skip  {(e.get('title') or '')[:40]:<42} closed {when}"
+                      " — `park forget` to drop it, `--closed` to rebuild anyway")
+            else:
+                keep.append(e)
+        lost = keep
+        if not lost:
+            print()
+            return
     for e in lost:
         title = e["title"]
         if not e.get("cwd") or not Path(e["cwd"]).exists():
@@ -2595,7 +2663,7 @@ KNOWN_FLAGS = {
     "ls": ("--json",), "list": ("--json",),
     "park": ("--dry-run", "--force", "--kill-anyway"),
     "pick": (), "unpark": (), "resume": (), "show": (),
-    "forget": (), "doctor": (), "rebuild": ("--dry-run",),
+    "forget": (), "doctor": (), "rebuild": ("--dry-run", "--closed"),
     "rekey": ("--dry-run",),
 }
 

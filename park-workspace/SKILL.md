@@ -541,6 +541,21 @@ park rekey           # workspaces came back under NEW uuids — re-point the ent
 park rebuild         # only for what rekey could not place: recreate from the ledger
 ```
 
+**An entry pointing at nothing has two very different causes, and the ledger
+cannot tell them apart:** cmux lost the workspace, or the user closed it on
+purpose. Rebuilding the second kind resurrects something deliberately shut —
+which happened, on a workspace closed the day before. cmux records the answer in
+`~/Library/Application Support/cmux/closed-item-history-*.json`, so `doctor` now
+says *"workspace was closed 2d ago — not lost; drop the entry with: park forget"*
+and `rebuild` **skips** those unless `--closed` is passed. Timestamps there are
+Core Data epoch (2001-01-01), not unix. Note the history records *a* close, not
+*who* closed it — the message says "was closed", because park itself closing a
+workspace looks identical.
+
+Forgetting an entry never costs the conversation: the transcript lives in
+`~/.claude/projects/**/<session-id>.jsonl` and `park show` prints the resume
+command before you drop it.
+
 **Order matters, and getting it wrong duplicates the fleet.** The ledger is keyed
 by cmux workspace uuid, and a reset regenerates every one of them while the
 workspaces themselves come back. Every parked entry therefore orphans at once —

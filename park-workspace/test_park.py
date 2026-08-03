@@ -8,6 +8,7 @@ the user a conversation. Everything that needs a live cmux socket is left to
 
     python3 test_park.py            # or: python3 -m unittest discover
 """
+import json
 import os
 import signal
 import subprocess
@@ -337,6 +338,67 @@ class TestRekeyMatch(unittest.TestCase):
                                         self.SPACES, set())
         self.assertIsNone(w)
         self.assertIn("no title", why)
+
+
+class TestClosedWorkspaces(unittest.TestCase):
+    """Telling "you closed it" apart from "cmux lost it".
+
+    Without this park told the user to `rebuild` a workspace they had shut on
+    purpose, and resurrected it.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.base = Path(self.dir.name)
+
+    def write(self, records, name="closed-item-history-com.cmuxterm.app.json"):
+        (self.base / name).write_text(json.dumps({"records": records}))
+
+    def record(self, ws_id, closed_at):
+        # cmux nests the payload one level down under "_0".
+        return {"closedAt": closed_at, "id": "r",
+                "entry": {"workspace": {"_0": {"workspaceId": ws_id,
+                                               "snapshot": {}}}}}
+
+    def test_a_closed_workspace_is_found_with_a_unix_timestamp(self):
+        # Core Data epoch: 0 there is 2001-01-01, not 1970-01-01.
+        self.write([self.record("WS-1", 0)])
+        got = park.closed_workspaces(self.base)
+        self.assertEqual(got, {"WS-1": park.APPLE_EPOCH})
+        self.assertEqual(
+            datetime.fromtimestamp(got["WS-1"], timezone.utc).year, 2001)
+
+    def test_the_latest_close_wins(self):
+        self.write([self.record("WS-1", 100), self.record("WS-1", 900),
+                    self.record("WS-1", 500)])
+        self.assertEqual(park.closed_workspaces(self.base)["WS-1"],
+                         900 + park.APPLE_EPOCH)
+
+    def test_panels_and_windows_are_not_workspaces(self):
+        self.write([{"closedAt": 1, "entry": {"panel": {"_0": {"id": "P"}}}},
+                    {"closedAt": 2, "entry": {"window": {"_0": {"id": "W"}}}}])
+        self.assertEqual(park.closed_workspaces(self.base), {})
+
+    def test_junk_records_are_skipped_not_fatal(self):
+        self.write([{"closedAt": "yesterday",
+                     "entry": {"workspace": {"_0": {"workspaceId": "WS-1"}}}},
+                    {"entry": {"workspace": {"_0": {"workspaceId": "WS-2"}}}},
+                    self.record("WS-3", 7)])
+        self.assertEqual(list(park.closed_workspaces(self.base)), ["WS-3"])
+
+    def test_an_unreadable_history_is_not_an_error(self):
+        (self.base / "closed-item-history-x.json").write_text("{not json")
+        self.assertEqual(park.closed_workspaces(self.base), {})
+
+    def test_no_history_at_all_is_not_an_error(self):
+        self.assertEqual(park.closed_workspaces(self.base), {})
+
+    def test_several_history_files_are_merged(self):
+        self.write([self.record("WS-1", 1)], "closed-item-history-a.json")
+        self.write([self.record("WS-2", 2)], "closed-item-history-b.json")
+        self.assertEqual(sorted(park.closed_workspaces(self.base)),
+                         ["WS-1", "WS-2"])
 
 
 class TestProcessLiveness(unittest.TestCase):
