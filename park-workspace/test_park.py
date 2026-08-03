@@ -401,6 +401,56 @@ class TestClosedWorkspaces(unittest.TestCase):
                          ["WS-1", "WS-2"])
 
 
+class TestLiveSessionIds(unittest.TestCase):
+    """The set that stops two processes appending to one transcript."""
+
+    SID = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"
+    OTHER = "11111111-2222-3333-4444-555555555555"
+
+    def setUp(self):
+        self.real_sid_of, self.real_cwd = park.session_id_of, park.proc_cwd
+        park.proc_cwd = lambda pid: "/r/x"
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        park.session_id_of, park.proc_cwd = self.real_sid_of, self.real_cwd
+
+    def table(self, *cmds):
+        return {100 + i: {"ppid": 1, "rss": 0, "cmd": c}
+                for i, c in enumerate(cmds)}
+
+    def test_an_id_in_argv_is_used_directly(self):
+        park.session_id_of = lambda pid, cwd=None: (None, None, None)
+        got = park.live_session_ids(self.table(f"claude --resume {self.SID}"))
+        self.assertEqual(got, {self.SID})
+
+    def test_a_bare_resume_is_resolved_off_its_transcript(self):
+        # cmux 0.64 restores agents as plain `claude --resume`, supplying the
+        # id out of band. argv alone returns nothing and the guard goes blind.
+        park.session_id_of = lambda pid, cwd=None: (self.OTHER, "/t.jsonl",
+                                                    "lsof")
+        got = park.live_session_ids(
+            self.table("claude --dangerously-skip-permissions --resume"))
+        self.assertEqual(got, {self.OTHER})
+
+    def test_non_claude_processes_are_not_resolved(self):
+        park.session_id_of = lambda pid, cwd=None: (self.OTHER, None, None)
+        got = park.live_session_ids(
+            self.table("vim /tmp/claude", "rg claude .", "node server.js"))
+        self.assertEqual(got, set())
+
+    def test_a_session_that_cannot_be_resolved_is_simply_absent(self):
+        park.session_id_of = lambda pid, cwd=None: (None, None, None)
+        got = park.live_session_ids(self.table("claude --resume"))
+        self.assertEqual(got, set())
+
+    def test_both_forms_together(self):
+        park.session_id_of = lambda pid, cwd=None: (self.OTHER, None, "scan")
+        got = park.live_session_ids(
+            self.table(f"claude --resume {self.SID}", "claude --resume"))
+        self.assertEqual(got, {self.SID, self.OTHER})
+
+
 class TestBarePrompt(unittest.TestCase):
     """Guards `repaint` before it types into someone's shell."""
 

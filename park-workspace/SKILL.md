@@ -535,6 +535,27 @@ as the ledger entry holding the only record of it, and it left the pre-filled
 `park unpark .` typed at a prompt where it could then only ever answer
 "not parked".
 
+## Never two processes on one transcript
+
+`unpark` refuses to resume a session that is already live, and that guard is
+the only thing between a double resume and a corrupted `.jsonl`. It used to
+build the live set from `ps` argv alone, which **stopped working in cmux
+0.64**: an agent cmux restores at launch runs as plain
+`claude --dangerously-skip-permissions --resume`, with the id supplied out of
+band. `argv_session_id` returns None for it, so the set came back short and
+the guard read as "checked" while matching nothing.
+
+Measured right after a cmux update: 12 of 13 live sessions still carried their
+id in argv (those had been restored with an explicit
+`cmux restore claude <uuid>`), and the 13th — the one cmux auto-restored on
+launch — did not. That is exactly the post-restart moment when unparking
+happens.
+
+`live_session_ids` therefore falls back to `session_id_of` for any claude
+without an id in argv, resolving it off the transcript it holds open. That is
+an lsof per such process, so `cmd_unpark` resolves the set **once** for a whole
+batch and passes it down rather than paying it per workspace.
+
 ## Recovering from a cmux reset
 
 A restart wipes what lives in cmux, not what lives in the ledger. Measured

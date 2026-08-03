@@ -1390,6 +1390,35 @@ def unsent_input(ws_id, surface=None):
     return ""
 
 
+def live_session_ids(table=None):
+    """Session ids of every claude process running right now.
+
+    argv alone stopped being enough. cmux 0.64 restores an agent as plain
+    `claude --dangerously-skip-permissions --resume`, supplying the id out of
+    band, so `argv_session_id` returns None for it and the set comes back
+    empty. That set is the only thing stopping `unpark` from starting a SECOND
+    process on a transcript that is already live, and two processes appending
+    to one .jsonl corrupt it. A guard that silently matches nothing is worse
+    than no guard: it reads as "checked".
+
+    So anything without an id in argv gets resolved the expensive way, off the
+    transcript it holds open. That costs an lsof per such process, which is why
+    callers pass the result around instead of recomputing it per workspace.
+    """
+    table = table if table is not None else ps_table()
+    ids = set()
+    for pid, info in table.items():
+        cmd = info.get("cmd") or ""
+        if not is_claude(cmd):
+            continue
+        sid = argv_session_id(cmd)
+        if not sid:
+            sid, _, _ = session_id_of(pid, proc_cwd(pid))
+        if sid:
+            ids.add(sid)
+    return ids
+
+
 def busy_verdict(state, sessions):
     """Decide whether a turn is really in flight. -> (pill_was_stale, refusal)
 
@@ -1698,7 +1727,7 @@ def clear_prefill(ws_id, sessions):
     return ok
 
 
-def unpark_one(w, allow_exec=False):
+def unpark_one(w, allow_exec=False, live_ids=None):
     """Resume one parked workspace. Returns a result dict; prints nothing.
 
     `allow_exec` is for `park unpark .` run inside the very workspace being
@@ -1750,7 +1779,7 @@ def unpark_one(w, allow_exec=False):
 
     # Never resume a conversation that is already live: two processes
     # appending to one transcript corrupts it.
-    running = {argv_session_id(i["cmd"]) for i in ps_table().values()}
+    running = live_session_ids() if live_ids is None else live_ids
     dupes = [s["session_id"] for s in e["sessions"] if s["session_id"] in running]
     if dupes and len(dupes) == len(e["sessions"]):
         # Every session is back, so the workspace is not parked any more —
@@ -1918,8 +1947,12 @@ def cmd_park(argv):
 
 def cmd_unpark(argv):
     targets = targets_from(argv)
+    # Resolved once: with cmux no longer putting the id in argv this costs an
+    # lsof per live claude, and it is the same answer for every target.
+    with Spinner("checking which sessions are already running…"):
+        live_ids = live_session_ids()
     for w in targets:
-        r = unpark_one(w, allow_exec=len(targets) == 1)
+        r = unpark_one(w, allow_exec=len(targets) == 1, live_ids=live_ids)
         mark = "▶" if r["ok"] else "skip"
         print(f"  {mark:<5} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
         for n in r["notes"]:
@@ -1962,7 +1995,7 @@ def cmd_doctor(argv):
         print("  no parked workspaces")
         return
     spaces = {w["id"]: w for w in all_workspaces()}
-    running = {argv_session_id(i["cmd"]) for i in ps_table().values()}
+    running = live_session_ids()
     closed = closed_workspaces()
     bad = 0
     for e in entries:
