@@ -275,6 +275,70 @@ class TestLedgerClaim(unittest.TestCase):
         self.assertEqual(p.stat().st_mode & 0o077, 0)
 
 
+class TestRekeyMatch(unittest.TestCase):
+    """A wrong re-key is silent and lands on a workspace the user is using."""
+
+    SPACES = [
+        {"id": "A", "ref": "workspace:1", "title": "api-fix",
+         "current_directory": "/r/api"},
+        {"id": "B", "ref": "workspace:2", "title": "web-fix",
+         "current_directory": "/r/web"},
+        {"id": "C", "ref": "workspace:3", "title": "twin",
+         "current_directory": "/r/one"},
+        {"id": "D", "ref": "workspace:4", "title": "twin",
+         "current_directory": "/r/two"},
+    ]
+
+    def entry(self, cwd, title):
+        return {"cwd": cwd, "title": title}
+
+    def test_an_exact_match_wins(self):
+        w, note, why = park.rekey_match(self.entry("/r/api", "api-fix"),
+                                        self.SPACES, set())
+        self.assertEqual(w["id"], "A")
+        self.assertIsNone(note)
+        self.assertIsNone(why)
+
+    def test_a_worktree_under_the_recorded_root_still_matches(self):
+        # The normal case, not the odd one: park records the worktree, cmux
+        # records the repo root. 19 of 44 real entries looked like this.
+        w, note, why = park.rekey_match(
+            self.entry("/r/api/.claude/worktrees/x", "api-fix"),
+            self.SPACES, set())
+        self.assertEqual(w["id"], "A")
+        self.assertIsNone(note)
+
+    def test_a_disagreeing_cwd_matches_but_is_reported(self):
+        # cmux's per-panel cwd is scrambled by a reset; the ledger's is ours.
+        w, note, why = park.rekey_match(
+            self.entry("/somewhere/else", "api-fix"), self.SPACES, set())
+        self.assertEqual(w["id"], "A")
+        self.assertIn("/r/api", note)
+
+    def test_a_repeated_title_refuses_rather_than_guessing(self):
+        w, note, why = park.rekey_match(self.entry("/r/one", "twin"),
+                                        self.SPACES, set())
+        self.assertIsNone(w)
+        self.assertIn("share this title", why)
+
+    def test_an_unavailable_workspace_is_never_adopted(self):
+        # Already claimed by another entry, or running a claude session.
+        w, note, why = park.rekey_match(self.entry("/r/api", "api-fix"),
+                                        self.SPACES, {"A"})
+        self.assertIsNone(w)
+
+    def test_freeing_one_twin_makes_the_other_unambiguous(self):
+        w, note, why = park.rekey_match(self.entry("/r/two", "twin"),
+                                        self.SPACES, {"C"})
+        self.assertEqual(w["id"], "D")
+
+    def test_an_entry_with_no_title_is_refused(self):
+        w, note, why = park.rekey_match(self.entry("/r/api", ""),
+                                        self.SPACES, set())
+        self.assertIsNone(w)
+        self.assertIn("no title", why)
+
+
 class TestProcessLiveness(unittest.TestCase):
     """Real processes: the zombie case is why this cannot be faked."""
 

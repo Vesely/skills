@@ -1954,8 +1954,10 @@ def cmd_doctor(argv):
             issues.append("git checkout changed since parking")
         live = spaces.get(e.get("workspace_id"))
         if not live:
+            # rekey first: after a reset the workspace is usually still there
+            # under a new uuid, and rebuild would make a second one beside it.
             issues.append("workspace no longer open in cmux "
-                          "(restore with: park rebuild)")
+                          "(try: park rekey, then park rebuild)")
         # Refs are positional and shift as workspaces open and close, so the one
         # captured at park time may now name a different workspace.
         ref = live["ref"] if live else (e.get("workspace_id") or "?")[:13]
@@ -2033,6 +2035,122 @@ def cmd_rebuild(argv):
             ledger_path(old_id).unlink(missing_ok=True)
         print(f"  rebuilt  {title[:44]}  → {new['ref']}")
     print()
+
+
+def rekey_match(entry, spaces, unavailable):
+    """The live workspace a ledger entry describes. -> (workspace, note, why_not)
+
+    Keyed on the TITLE and corroborated by the cwd, not the other way round.
+    `pin_title` freezes the workspace name at park time precisely so it
+    survives, and it does: measured across a real 44-entry ledger, every title
+    still matched its workspace while 21 of the cwds did not. cmux records the
+    repo ROOT for an agent living in a worktree under it (19 cases), and its
+    per-panel cwd can be scrambled outright by a reset (2 cases, both pointing
+    at a sibling worktree). A cwd-first rule would have refused half the fleet.
+
+    What stops a wrong adopt is UNIQUENESS, not the cwd: the title must match
+    exactly one workspace still up for adoption. A disagreeing cwd is reported
+    rather than obeyed — the ledger wrote its own, cmux's is the guess.
+    """
+    title, cwd = (entry.get("title") or ""), entry.get("cwd")
+    if not title:
+        return None, None, "entry records no title to match on"
+    hits = [w for w in spaces
+            if w["id"] not in unavailable and (w.get("title") or "") == title]
+    if not hits:
+        return None, None, "no free live workspace carries this title"
+    if len(hits) > 1:
+        return None, None, f"{len(hits)} live workspaces share this title"
+    w = hits[0]
+    theirs = w.get("current_directory") or ""
+    note = None
+    if cwd and theirs and cwd != theirs and not (
+            cwd.startswith(theirs.rstrip("/") + "/")
+            or theirs.startswith(cwd.rstrip("/") + "/")):
+        note = f"cmux reports cwd {theirs} — kept the ledger's"
+    return w, note, None
+
+
+def cmd_rekey(argv):
+    """Re-point ledger entries at workspaces whose UUID changed under them.
+
+    A cmux reset regenerates every workspace UUID while the workspaces
+    themselves come back. The ledger is keyed by that UUID, so every parked
+    entry orphans at once — and `rebuild` reads them all as lost and creates a
+    SECOND workspace beside each survivor. With 45 parked that is 45
+    duplicates. Re-keying puts each entry back on the workspace it already
+    describes; only what is left over is a job for `rebuild`.
+    """
+    dry = "--dry-run" in argv
+    with Spinner("looking for workspaces the entries have lost track of…"):
+        spaces = all_workspaces()
+        live_by_id = {w["id"] for w in spaces}
+        entries = read_ledger()
+        orphans = [e for e in entries if e.get("workspace_id") not in live_by_id]
+        # Never adopt a workspace another entry already claims, and never adopt
+        # one with a claude running in it: that would mark a workspace the user
+        # is working in as parked, and the next unpark would start a second
+        # process on a transcript it never killed.
+        unavailable = {e["workspace_id"] for e in entries
+                       if e.get("workspace_id") in live_by_id}
+        if orphans:
+            by_ws, table = attribute(spaces), ps_table()
+            for w in spaces:
+                if classify(by_ws.get(w["ref"], []), table)[0]:
+                    unavailable.add(w["id"])
+
+    if not orphans:
+        print("  nothing to re-key — every parked entry still names a live "
+              "workspace\n")
+        return
+
+    done, stuck = 0, 0
+    for e in orphans:
+        title = e.get("title") or ""
+        new, note, why = rekey_match(e, spaces, unavailable)
+        if not new:
+            print(f"  skip     {title[:44]:<46} {why}")
+            stuck += 1
+            continue
+        if dry:
+            print(f"  would re-key  {title[:40]:<42} → {new['ref']}")
+            if note:
+                print(f"                {note}")
+            done += 1
+            continue
+        old_id = e["workspace_id"]
+        # The surfaces died with the old workspace ids, exactly as after a
+        # rebuild, so unpark must fall back to the workspace's own surface.
+        for s in e["sessions"]:
+            s["surface"] = ""
+        e.update({"workspace_id": new["id"], "workspace_ref": new["ref"],
+                  "window_id": new.get("window_id")})
+        if not write_entry(ledger_path(new["id"]), e):
+            print(f"  FAILED   {title[:44]:<46} could not write the new entry")
+            stuck += 1
+            continue
+        ledger_path(old_id).unlink(missing_ok=True)
+        unavailable.add(new["id"])
+        # The reset wiped the pill and the colour with everything else, so the
+        # workspace is sitting there parked and looking live. Put them back.
+        cmux_do("set-status", PILL_KEY,
+                f"Parked · {human(e.get('freed_bytes') or 0)} freed",
+                "--icon", "snowflake", "--color", "#5AC8FA", "--priority", "90",
+                "--workspace", new["id"])
+        cmux_do("workspace-action", "--action", "set-color", "--color",
+                PARKED_COLOR, "--workspace", new["id"])
+        done += 1
+        print(f"  re-keyed  {title[:44]:<46} → {new['ref']}")
+        if note:
+            print(f"            {note}")
+
+    verb = "would re-key" if dry else "re-keyed"
+    print(f"\n  {verb} {done}, {stuck} left for `park rebuild`")
+    if not dry and done:
+        print("  the typed `park unpark .` prefill did not survive the reset — "
+              "resume these by name\n")
+    else:
+        print()
 
 
 # --- Interactive picker ------------------------------------------------------
@@ -2456,6 +2574,8 @@ USAGE = """park — free RAM from idle cmux workspaces without closing them
   park show <target>           dump the ledger entry
   park forget <target>         drop a stale ledger entry without resuming
   park doctor                  verify every parked entry is still restorable
+  park rekey                   re-point entries after cmux regenerated its
+                               workspace uuids (--dry-run). Run BEFORE rebuild
   park rebuild                 recreate workspaces cmux lost (--dry-run)
 
 targets:  workspace:12 | <uuid> | <title substring> | window:2 | .
@@ -2476,6 +2596,7 @@ KNOWN_FLAGS = {
     "park": ("--dry-run", "--force", "--kill-anyway"),
     "pick": (), "unpark": (), "resume": (), "show": (),
     "forget": (), "doctor": (), "rebuild": ("--dry-run",),
+    "rekey": ("--dry-run",),
 }
 
 
@@ -2500,7 +2621,8 @@ def main():
         cmd, rest = "park", ["."] + rest
     table = {"ls": cmd_ls, "list": cmd_ls, "park": cmd_park, "pick": cmd_pick,
              "unpark": cmd_unpark, "resume": cmd_unpark, "show": cmd_show,
-             "forget": cmd_forget, "doctor": cmd_doctor, "rebuild": cmd_rebuild}
+             "forget": cmd_forget, "doctor": cmd_doctor, "rebuild": cmd_rebuild,
+             "rekey": cmd_rekey}
     if cmd not in table:
         die(f"unknown command '{cmd}'\n\n{USAGE}")
     # Unrecognised flags used to be filtered out silently alongside the real
