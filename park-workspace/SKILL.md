@@ -34,6 +34,8 @@ park                       interactive picker    [park pick <filter>]
 park ls                    dashboard grouped by window   [--json]
 park .                     park the workspace you are in
 park park <target>...      park workspace(s)  [--dry-run] [--force] [--kill-anyway]
+park park --idle 3d        park everything idle that long (asks first)
+park park --all            park everything parkable (asks first)
 park unpark <target>...    resume a parked workspace
 park show <target>         dump the ledger entry
 park forget <target>       drop a stale ledger entry without resuming
@@ -62,6 +64,29 @@ returned to the system is somewhat lower; this is the set of processes that go.)
 `ls` groups by window — window = project in this user's mental model — and gives a
 per-window "parkable" total, which is the number to quote when offering to park.
 `--json` emits the same rows for scripting.
+
+A `⚠` row is a **parked entry with a session running in it**. Something resumed
+the workspace behind park's back — a hand-run `cmux restore` after a reset does
+exactly this — and the row used to claim `❄ parked` and report the megabytes it
+freed days ago. It now shows the memory the workspace is holding *now* and
+counts as live. `park unpark` on it clears the stale entry without resuming
+anything; `park forget` does the same if you want the session left alone.
+
+**Exit codes.** `0` when every target reached the state you asked for — an
+already-parked workspace or an already-unparked one counts — and `1` when any
+was refused. `park doctor` exits `1` when any entry needs attention. Nothing
+about the shortcut cares, but a health check or a `park . && …` has no other way
+to find out, and a tool that always exits 0 reads as "fine".
+
+`--idle <30m|6h|3d|2w>` and `--all` pick their own targets: everything with a
+live session that is not parked, not mid-turn, and — for `--idle` — whose last
+submitted prompt is at least that old. A workspace cmux has **no** timestamp for
+is left out rather than treated as idle forever. Both ask for a typed `yes`
+first (`--dry-run` shows the list without asking), neither accepts named targets,
+and **neither can be combined with `--kill-anyway`**: choosing in bulk and
+waiving the guards that protect a running turn are each defensible and together
+are not. Every selected workspace still goes through the full guard chain, so
+this narrows the list and never widens what park is willing to kill.
 
 ## The picker
 
@@ -142,35 +167,48 @@ A scan is ~1.4 s across 45 workspaces, down from ~25 s. Keep it that way:
   even displayable from `ps` data alone, then queries only those.
 - **A `Spinner` covers the wait** on stderr, so it never redirects into output
   and stays silent when piped.
-- **A batch shares one CPU window.** `cpu_snapshots()` is system-wide and
-  corroborates ten workspaces as well as one, so `cmd_park` takes a single 2 s
-  reading for the whole batch instead of one per target. Nothing is traded
-  away: that gate is the corroborating one, and each workspace still gets its
-  own fresh pill-and-transcript verdict re-run immediately before the kill.
+- **A batch parks in waves of `PARK_WAVE` (8), not one at a time.** Everything a
+  park does is waiting — cmux round-trips, a CPU window, git — and the picker has
+  always parked rows concurrently; only the CLI walked its targets in single
+  file. `park park window:4 --dry-run` was 17.8 s for 20 targets; it now does 31
+  in 11.4 s. Each wave takes its own snapshot, and `attribute()` overlaps with
+  the 2 s CPU window that would otherwise be pure sleeping.
+- **A wave shares one CPU window.** `cpu_snapshots()` is system-wide and
+  corroborates eight workspaces as well as one. Per *wave* rather than per
+  batch on purpose: the old single reading was taken once and never refreshed,
+  so late targets in a long batch were judged on minutes-old numbers. Nothing
+  else is traded away — that gate is the corroborating one, and each workspace
+  still gets its own fresh pill, draft and transcript verdict re-run
+  immediately before the kill.
 - **The kill wait is polled, not slept.** `wait_gone` returns as soon as the
   tree is gone — normally well under 200 ms — and only spends its full budget
   on something genuinely stuck. Measured across three targets, the two changes
   together took a dry run from 10.1 s to 5.7 s.
-- **The picker already parks in parallel** — each toggle runs `park_one` in its
-  own thread, so multi-select overlaps by itself.
+- **`unpark` stays serial.** It is nearly always one target, it hands the
+  terminal over with `exec` when it is, and each resume has to be folded into
+  the already-running set before the next one is considered.
 
 ## Tests
 
-`python3 test_park.py` — stdlib `unittest`, ~0.7 s, no cmux required.
+`python3 test_park.py` — 116 tests, stdlib `unittest`, ~1.4 s, no cmux required.
 
 It covers the decisions made *before* anything is killed: who counts as a dev
 server, which claude processes are root sessions, whether a turn is in flight,
-how a session comes back, and the two screen reads that stand between park and
-something the user typed. Liveness is tested against real processes, because
-the zombie case — a corpse that still answers `kill(pid, 0)` — cannot be faked
-and is what used to trigger the rollback that deleted the ledger.
+how a session comes back, what the ledger still owes after a partial unpark, and
+the screen reads that stand between park and something the user typed. Liveness
+and process identity are tested against real processes, because the zombie case
+— a corpse that still answers `kill(pid, 0)` — cannot be faked and is what used
+to trigger the rollback that deleted the ledger.
 
-The suite was checked by reintroducing each fixed bug and confirming it fails:
+The suite is checked by reintroducing each fixed bug and confirming it fails:
 zombie-as-survivor, unconditional `ctrl+u`, the draft guard failing open, the
-lowercase-only session-id scan, subagents counted as root sessions, binary
-names matched anywhere in a command line, and the pill trusted without
-corroboration. All seven were caught. Add tests the same way — a test that
-still passes with the bug back in does not test what it claims.
+lowercase-only session-id scan, subagents counted as root sessions, binary names
+matched anywhere in a command line, the pill trusted without corroboration,
+wrappers hiding `git` from `NEVER_KILL`, a recycled pid matched on its command
+line, deleting the ledger with tabs still owed, the prefill-only prompt check,
+a non-exclusive operation lock, and `rebuild` duplicating what `rekey` could
+place. Every one was caught. Add tests the same way — a test that still passes
+with the bug back in does not test what it claims.
 
 ## Why this is safe
 
@@ -270,7 +308,18 @@ matching on the surface alone meant the resume was typed into the very tab
 running park. With no surface to compare, `CMUX_WORKSPACE_ID` against the
 workspace is the same statement, so that is the fallback.
 
-Two traps in reconstructing that command:
+**The line has to be empty before anything is typed on it.** `prepare_prompt`
+clears park's own prefill, **re-reads**, and requires what remains to be a bare
+prompt. Asking only "is this our prefill?" was not enough: a cmux restart wipes
+the terminal buffer, so after one the prefill is gone — and if the user had
+`git status` half typed, unpark left the line alone, called that success, and
+appended its command plus enter. One mangled command, no session, and the ledger
+entry deleted on the way out. `bare_prompt` is the other half: `❯ » ➜ ›` pass on
+sight, but `$ % #` need a path- or host-looking token in front of them, or
+`echo $` reads as an empty prompt. Refusing a real prompt costs a re-typed
+prefill; accepting a written-on one costs the user's line.
+
+Traps in reconstructing that command:
 
 - **Run it through `CMUX_CLAUDE_WRAPPER_SHIM`** when present. Bypassing the shim
   works, but cmux stops maintaining the workspace's agent binding and status
@@ -282,8 +331,10 @@ Two traps in reconstructing that command:
   passes every other backslash through untouched — there is no escape for a
   literal backslash, so payloads go verbatim. Backslash-doubling "to be safe"
   corrupts cmux's recorded commands (which contain backslash-quote runs) into a
-  path the shell cannot find. Enter is sent as a separate `send-key`, so
-  submitting never depends on escaping.
+  path the shell cannot find. Enter is a real newline **byte on the same call**,
+  not a second `send-key`: splitting the two raced the shell, and against a slow
+  prompt the text landed while the enter did not — a correct resume command
+  typed but never run, reported as "resumed".
 - **Mutating cmux calls must not retry.** A nonzero exit after the write already
   landed is itself a transient-socket symptom; retrying `send` twice more leaves
   `park unpark .park unpark .park unpark .` typed at the prompt. `cmux_do` is
@@ -326,7 +377,10 @@ absolute path happily, at which point `unlink()` deletes something else.
   nowhere on disk — so killing the session is the one operation that destroys it
   silently. `unsent_input` reads it off the screen (the `>` line fenced by box
   rules; requiring the rule above it is what stops a shell prompt reading as a
-  draft) and park refuses, quoting the text back.
+  draft) and park refuses, quoting the text back. It runs **twice** — once
+  before the expensive checks and again immediately before the kill, because
+  the seconds in between (a CPU window, a status round-trip, a session lookup
+  per tab) are exactly when someone watching the workspace types into it.
 - **Never park a session mid-turn.** The gate is the `claude_code` status pill
   (`Running` = a turn is in flight) corroborated by a CPU sample. About a third
   of workspaces carry **no pill at all**, and a session blocked on a slow tool
@@ -367,6 +421,18 @@ absolute path happily, at which point `unlink()` deletes something else.
   average, so subtracting two samples measures *acceleration*: a session pinned
   at 100% gave deltas of −4.1, +3.5, −42.1, all under the 15% threshold. For as
   long as it did that, the CPU corroboration was decorative.
+- **It samples the whole tree, not the roots.** A turn that shells out to a
+  compiler or a test run leaves the root claude near 0% while the machine is
+  flat out. Measured on a workspace mid-turn: roots 8.8%, tree 17.6% — one side
+  of the 15% threshold each. With no pill and a tool call that writes nothing
+  for 20 s, this gate is the last one standing, so it has to see the work.
+- **One park or unpark per workspace at a time.** Claiming the ledger entry is
+  not enough: park publishes that entry *before* it kills anything, so an unpark
+  arriving in that window reads it, sees every session still live, takes the
+  "already running" path and deletes it — and then park kills the sessions whose
+  only resume record has just gone. A per-workspace lock file recording its
+  owner's pid is held across the whole transaction; a lock whose owner is gone
+  is not a lock, so a park that was SIGKILLed does not wedge the workspace.
 - **Never park what cannot be restored.** If the session id or cwd will not
   resolve, skip that workspace and say so, rather than killing it.
 - **Dev servers and test browsers are stopped but NOT restarted** on unpark.
@@ -554,7 +620,27 @@ happens.
 `live_session_ids` therefore falls back to `session_id_of` for any claude
 without an id in argv, resolving it off the transcript it holds open. That is
 an lsof per such process, so `cmd_unpark` resolves the set **once** for a whole
-batch and passes it down rather than paying it per workspace.
+batch and passes it down rather than paying it per workspace — folding each
+resume back into the set as it goes, so a batch is not answering from the
+snapshot it took before any of them existed.
+
+Ids are compared **lowercased** on both sides. cmux writes uppercase uuids in
+places and the ledger records whatever spelling its source used, so a
+case-sensitive `in` test was a guard that matched nothing at all.
+
+The fallback can still fail — lsof denied, a cwd that will not read — and this
+guard **fails open**, so `unpark` says out loud when a running claude could not
+be identified rather than leaving the silence to be read as "checked".
+
+The other half of the same rule: **a `cmux send` that succeeds is not a session
+that started.** A stale cwd, a shim that moved, or claude refusing to start all
+leave the tab at a shell prompt, and unpark used to delete the ledger entry —
+session id, transcript and resume command — on the strength of the send alone.
+It now waits for a claude process carrying that id to appear (a `ps` sweep; our
+own resume command puts the id in argv) and keeps whatever did not come up. Same
+for tabs it cannot resume at all: after a rebuild the workspace has one surface,
+so the second and later tabs stay in the ledger with their commands instead of
+being mentioned in a note that `exec` then prevents anyone from printing.
 
 ## Recovering from a cmux reset
 
@@ -605,7 +691,12 @@ workspaces themselves come back. Every parked entry therefore orphans at once �
 which looks exactly like "cmux lost them" and made `rebuild` the obvious command.
 It is the wrong one: `rebuild` treats an orphan as gone and creates a **second**
 workspace beside each survivor. Run `rekey` first; `rebuild` is for what is
-genuinely missing.
+genuinely missing — and `rebuild` now **enforces** that rather than documenting
+it: any entry whose title already matches a free live workspace is held back with
+a pointer to `rekey`, because a rule nothing checks is a rule that gets skipped
+exactly when it matters. `rekey` in turn skips entries whose workspace the user
+**closed**: that is not a lost uuid, and adopting one would mark an unrelated
+live workspace as parked over a shared title.
 
 `rekey` matches on the workspace **title**, corroborated by the cwd — not the
 reverse, which was the first attempt and matched 23 of 44. `pin_title` freezes the

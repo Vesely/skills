@@ -976,6 +976,64 @@ class TestWaitForSessions(unittest.TestCase):
                          {sid.lower()})
 
 
+class TestBulkSelection(unittest.TestCase):
+    """`--idle`/`--all` choose their own targets, so what they skip matters."""
+
+    def setUp(self):
+        self.real = {k: getattr(park, k) for k in ("all_workspaces", "collect")}
+        self.addCleanup(lambda: [setattr(park, k, v)
+                                 for k, v in self.real.items()])
+
+    def rows(self, *rows):
+        spaces = [{"id": r["ref"], "ref": r["ref"], "title": r["ref"]}
+                  for r in rows]
+        park.all_workspaces = lambda: spaces
+        park.collect = lambda sp=None: rows
+
+    def row(self, ref, hours=None, parked=False, busy=False, byts=1):
+        since = None if hours is None else (
+            datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        return {"ref": ref, "parked": parked, "busy": busy, "bytes": byts,
+                "since": since}
+
+    def test_duration_needs_a_unit(self):
+        self.assertEqual(park.parse_duration("3d"), 3 * 86400)
+        self.assertEqual(park.parse_duration("90m"), 5400)
+        self.assertEqual(park.parse_duration("12 h"), 43200)
+        # A bare number could be seconds or days, and one of those parks the
+        # whole machine.
+        with self.assertRaises(SystemExit):
+            park.parse_duration("3")
+
+    def test_the_value_does_not_stay_behind_as_a_target(self):
+        for argv in (["--idle", "3d", "--dry-run"], ["--idle=3d", "--dry-run"]):
+            secs, rest = park.flag_value(argv, "--idle")
+            self.assertEqual(secs, 3 * 86400)
+            self.assertEqual(rest, ["--dry-run"], argv)
+
+    def test_idle_picks_only_what_has_been_quiet_long_enough(self):
+        self.rows(self.row("workspace:1", hours=30),
+                  self.row("workspace:2", hours=1))
+        picked, _ = park.bulk_targets(24 * 3600)
+        self.assertEqual([w["ref"] for w in picked], ["workspace:1"])
+
+    def test_a_workspace_with_no_timestamp_is_never_picked(self):
+        # "we do not know when you last touched it" must not read as "idle
+        # forever" — seconds_since returns inf for a missing timestamp.
+        self.rows(self.row("workspace:1", hours=None))
+        self.assertEqual(park.bulk_targets(3600)[0], [])
+        self.assertEqual([w["ref"] for w in park.bulk_targets(None)[0]],
+                         ["workspace:1"])   # --all does not ask about time
+
+    def test_parked_and_busy_rows_are_left_out(self):
+        self.rows(self.row("workspace:1", hours=99, parked=True),
+                  self.row("workspace:2", hours=99, busy=True),
+                  self.row("workspace:3", hours=99, byts=0),
+                  self.row("workspace:4", hours=99))
+        self.assertEqual([w["ref"] for w in park.bulk_targets(None)[0]],
+                         ["workspace:4"])
+
+
 class TestFormatting(unittest.TestCase):
     def test_ago_reads_both_timestamp_dialects(self):
         # Ours is +00:00, cmux's ends in Z, and 3.9 rejects the Z form.

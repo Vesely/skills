@@ -68,6 +68,10 @@ OP_LOCK_STALE_SECONDS = 300.0
 # How stale cmd_park lets its process snapshot get before re-taking it, so a
 # session started during a long batch cannot be missed by classify().
 SNAPSHOT_MAX_AGE = 5.0
+# How many workspaces a batch parks at once. Each one is almost entirely
+# waiting — cmux round-trips, a CPU window, git — and they share one snapshot
+# per wave, so the wave size is also how fresh that snapshot stays.
+PARK_WAVE = 8
 
 # A turn is in flight -> never park. Anything else is fair game.
 BUSY_STATES = {"running", "working", "thinking", "compacting"}
@@ -1149,6 +1153,55 @@ def resolve_targets(args):
     return out
 
 
+DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhdw])$")
+DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_duration(text):
+    """`3d`, `12h`, `90m` -> seconds. Dies on anything else.
+
+    Deliberately unit-only: a bare `park park --idle 3` could mean seconds or
+    days, and one of those parks the whole machine.
+    """
+    m = DURATION_RE.match(str(text).strip().lower())
+    if not m:
+        die(f"cannot read {text!r} as a duration — use 30m, 6h, 3d or 2w")
+    return float(m.group(1)) * DURATION_UNITS[m.group(2)]
+
+
+def human_duration(seconds):
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            n = seconds / size
+            return f"{n:.0f}{unit}" if n == int(n) else f"{n:.1f}{unit}"
+    return f"{seconds:.0f}s"
+
+
+def flag_value(argv, name):
+    """Pull `--flag V` / `--flag=V` out of argv. -> (seconds, argv without it)
+
+    Returned separately because the value would otherwise be left sitting in
+    argv as a positional — and a positional to `park park` is a workspace.
+    """
+    out, value = [], None
+    skip = False
+    for i, a in enumerate(argv):
+        if skip:
+            skip = False
+            continue
+        if a == name:
+            if i + 1 >= len(argv):
+                die(f"{name} needs a duration, e.g. {name} 3d")
+            value = parse_duration(argv[i + 1])
+            skip = True
+            continue
+        if a.startswith(name + "="):
+            value = parse_duration(a.split("=", 1)[1])
+            continue
+        out.append(a)
+    return value, out
+
+
 def targets_from(argv, msg="no target"):
     """Positional args -> workspaces. Every command takes targets this way.
 
@@ -1286,6 +1339,12 @@ def collect(spaces=None):
     for (w, procs, claude, dev, browser, entry), state, g, is_stale in zip(
             keep, states, gits, stales):
         last = (w.get("latest_submitted_message") or "").strip().replace("\n", " ")
+        # A ledger entry AND a live session. Something resumed this workspace
+        # behind park's back — a hand-run `cmux restore` after a reset does it,
+        # and it happened to 12 sessions here in one afternoon. The row used to
+        # claim "parked" and report the megabytes it freed days ago, which is
+        # both wrong and the reason nobody notices.
+        conflict = bool(entry) and bool(claude)
         rows.append({
             "ref": w["ref"], "id": w["id"],
             # cmux falls back to showing the directory once the agent is gone,
@@ -1295,7 +1354,8 @@ def collect(spaces=None):
             "window_id": w.get("window_id", ""),
             "window_index": w["window_index"],
             "parked": bool(entry),
-            "bytes": (entry.get("freed_bytes", 0) if entry
+            "conflict": conflict,
+            "bytes": (entry.get("freed_bytes", 0) if entry and not conflict
                       else tree_rss(procs, table)),
             "state": (state + " (stale)") if is_stale else (state or "-"),
             "busy": state.lower() in BUSY_STATES and not is_stale,
@@ -1320,12 +1380,19 @@ def cmd_ls(argv):
 
     peak = max((r["bytes"] for r in rows), default=1)
 
-    tot_parked = sum(r["bytes"] for r in rows if r["parked"])
-    tot_live = sum(r["bytes"] for r in rows if not r["parked"])
-    tot_free = sum(r["bytes"] for r in rows if not r["parked"] and not r["busy"])
+    # A conflicted row holds real memory right now, so it counts as live — and
+    # it is not parkable, because park will answer "already parked" until the
+    # entry is cleared.
+    def live_now(r):
+        return not r["parked"] or r["conflict"]
+
+    tot_parked = sum(r["bytes"] for r in rows if not live_now(r))
+    tot_live = sum(r["bytes"] for r in rows if live_now(r))
+    tot_free = sum(r["bytes"] for r in rows
+                   if not r["parked"] and not r["busy"])
 
     for win, group in group_by_window(rows):
-        live = sum(r["bytes"] for r in group if not r["parked"])
+        live = sum(r["bytes"] for r in group if live_now(r))
         freeable = sum(r["bytes"] for r in group
                        if not r["parked"] and not r["busy"])
         print(f"\n  {win}        {len(group):>2} ws"
@@ -1333,7 +1400,9 @@ def cmd_ls(argv):
               f"    {human(freeable):>9} parkable")
         print(f"  {'─' * 84}")
         for r in group:
-            if r["parked"]:
+            if r["conflict"]:
+                mark, tail = "⚠", "parked, but live"
+            elif r["parked"]:
                 mark, tail = "❄", "parked " + ago(r["since"])
             elif r["busy"]:
                 mark, tail = "●", r["state"]
@@ -1349,7 +1418,11 @@ def cmd_ls(argv):
     print(f"  {human(tot_live)} live · {human(tot_parked)} parked · "
           f"{human(tot_free)} parkable right now")
     print("  ❄ parked   ● turn in flight (never parked)   ○ parkable"
-          "   [Nd dev · Nb browser · ~N dirty]\n")
+          "   [Nd dev · Nb browser · ~N dirty]")
+    if any(r["conflict"] for r in rows):
+        print("  ⚠ a parked entry with a session running in it — `park unpark` "
+              "clears the entry, or `park forget` if you want it left alone")
+    print()
 
 
 def ago(iso):
@@ -2263,43 +2336,125 @@ def cmd_park(argv):
     dry = "--dry-run" in argv
     force = "--force" in argv
     brutal = "--kill-anyway" in argv
-    targets = targets_from(
-        argv, "no target — pass a workspace ref, a title, `window:N`, or `.`")
-    if brutal and not dry:
-        confirm_kill_anyway(targets)
+    idle, argv = flag_value(argv, "--idle")
+    bulk = "--all" in argv
+    if brutal and (bulk or idle):
+        # Selecting in bulk and overriding the two guards that protect a
+        # running turn are individually defensible and together are not.
+        die("--kill-anyway cannot be combined with --all or --idle — name the "
+            "workspaces you mean")
 
-    with Spinner("checking what is safe to park…"):
-        spaces = all_workspaces()
-        by_ws = attribute(spaces)
-        table = ps_table()
-        # One CPU window for the whole batch. It is the corroborating gate, not
-        # the deciding one — every workspace still gets its own fresh pill and
-        # transcript verdict, re-run immediately before the kill — so sharing a
-        # few-seconds-old reading across the batch trades nothing for turning
-        # `park park window:2` from half a minute of sleeping into one wait.
-        snaps = cpu_snapshots()
-    taken = time.time()
+    if bulk or idle:
+        if [a for a in argv if not a.startswith("--")]:
+            die("--all and --idle choose the targets themselves — "
+                "do not name any")
+        targets, spaces = bulk_targets(idle)
+        if not targets:
+            print("  nothing matches\n")
+            return 0
+        if not dry and not confirm_bulk(targets, idle):
+            return 1
+    else:
+        targets = targets_from(
+            argv,
+            "no target — pass a workspace ref, a title, `window:N`, or `.`")
+        spaces = None
+        if brutal:
+            confirm_kill_anyway(targets)
 
-    total, done = 0, 0
-    for w in targets:
-        # The process snapshot ages as the batch runs, and a session started
-        # after it was taken is invisible to classify() — park would kill the
-        # rest, write the ledger and report the workspace parked with a live
-        # claude still in it. Re-attributing reuses `spaces`, so it costs a ps
-        # sweep rather than another round of cmux round-trips.
-        if time.time() - taken > SNAPSHOT_MAX_AGE:
-            by_ws, table, taken = attribute(spaces), ps_table(), time.time()
-        r = park_one(w, by_ws, table, dry=dry, force=force, brutal=brutal,
-                     snaps=snaps)
-        mark = ("would park" if dry else "❄") if r["ok"] else "skip"
-        print(f"  {mark:<11} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
-        for n in r["notes"]:
-            print(f"              {n}")
-        if r["ok"]:
-            total += r["freed"]
-            done += 1
+    if spaces is None:
+        with Spinner("looking at the workspaces…"):
+            spaces = all_workspaces()
+
+    total, done, refused = 0, 0, 0
+    # In waves, not one at a time. Everything a park does is I/O — cmux socket
+    # round-trips, a CPU window, git — and the picker has always parked rows
+    # concurrently; only the CLI paid for 20 workspaces one after another
+    # (measured: 17.8 s for a dry run of window:4). A wave also gets its own
+    # fresh snapshot, which fixes the other half of the problem: the old code
+    # re-read `ps` as the batch aged but kept the CPU sample it took at the
+    # start, so late targets were judged on a reading minutes old.
+    for i in range(0, len(targets), PARK_WAVE):
+        wave = targets[i:i + PARK_WAVE]
+        with Spinner("checking what is safe to park…"):
+            # The CPU window is two seconds of sleeping and attribution is a
+            # `ps` sweep plus lsof; neither needs the other, so they overlap.
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f_procs = ex.submit(lambda: (attribute(spaces), ps_table()))
+                f_snaps = ex.submit(cpu_snapshots)
+                (by_ws, table), snaps = f_procs.result(), f_snaps.result()
+        results = pmap(
+            lambda w: park_one(w, by_ws, table, dry=dry, force=force,
+                               brutal=brutal, snaps=snaps),
+            wave, workers=PARK_WAVE)
+        # Printed in the order the targets were named, never in the order the
+        # workers happened to finish.
+        for r in results:
+            mark = ("would park" if dry else "❄") if r["ok"] else "skip"
+            print(f"  {mark:<11} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
+            for n in r["notes"]:
+                print(f"              {n}")
+            if r["ok"]:
+                total += r["freed"]
+                done += 1
+            elif r["msg"] != "already parked":
+                refused += 1
     verb = "would free" if dry else "freed"
     print(f"\n  {done} workspace(s), {verb} {human(total)}\n")
+    return 1 if refused else 0
+
+
+def bulk_targets(idle):
+    """Workspaces `--idle`/`--all` picks out. -> (targets, spaces)
+
+    Idle is measured from cmux's `latest_submitted_at` — when YOU last sent
+    this workspace a prompt. A workspace with no such timestamp is left out
+    rather than treated as idle forever: "we do not know" is the one answer a
+    bulk selector must not read as "safe to kill".
+
+    This only narrows the list. Every workspace it picks still goes through
+    park_one's whole guard chain, so nothing here can park a busy session.
+    """
+    with Spinner("looking for idle workspaces…"):
+        spaces = all_workspaces()
+        rows = collect(spaces)
+    by_ref = {w["ref"]: w for w in spaces}
+    picked = []
+    for r in rows:
+        if r["parked"] or r["busy"] or not r["bytes"]:
+            continue
+        if idle is not None:
+            age = seconds_since(r["since"])
+            if age == float("inf") or age < idle:
+                continue
+        w = by_ref.get(r["ref"])
+        if w:
+            picked.append(w)
+    return picked, spaces
+
+
+def confirm_bulk(targets, idle):
+    """Bulk parking is a lot of killing at once, so it asks first."""
+    print(f"\n  About to park {len(targets)} workspace(s)"
+          + (f", idle for {human_duration(idle)} or more" if idle else "")
+          + ":\n")
+    for w in targets[:20]:
+        print(f"    {w['ref']:<13} {(w.get('title') or '')[:50]}")
+    if len(targets) > 20:
+        print(f"    … and {len(targets) - 20} more")
+    print("\n  Dev servers and test browsers in them stop too, and unpark does "
+          "not bring those back.")
+    if not sys.stdin.isatty():
+        die("--all/--idle needs a terminal to confirm at — "
+            "use --dry-run to see the list")
+    try:
+        answer = input("\n  type 'yes' to go ahead: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer != "yes":
+        print("  aborted\n")
+        return False
+    return True
 
 
 def cmd_unpark(argv):
@@ -2321,7 +2476,9 @@ def cmd_unpark(argv):
         print(f"  {mark:<5} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
         for n in r["notes"]:
             print(f"        {n}")
-        resumed += bool(r["ok"])
+        # "not parked" is the state the caller asked for, so it is not a
+        # failure — the same way an "already parked" park is not one.
+        resumed += bool(r["ok"]) or r["msg"] == "not parked"
         # A batch resumes sessions as it goes; without this the guard would
         # still be answering from the snapshot taken before any of them existed.
         live_ids |= {str(i).lower() for i in r.get("resumed_ids", ())}
@@ -2356,6 +2513,7 @@ def cmd_forget(argv):
         path = ledger_path(w["id"])
         if not path.exists():
             print(f"  skip  {w['ref']}  — not parked")
+            dropped += 1        # already forgotten: the asked-for state
             continue
         # The same lock park and unpark take: this deletes the entry, and
         # deleting it out from under a park that is mid-kill leaves the session
@@ -2385,7 +2543,7 @@ def cmd_doctor(argv):
     entries = read_ledger(with_broken=True)
     if not entries:
         print("  no parked workspaces")
-        return
+        return 0
     spaces = {w["id"]: w for w in all_workspaces()}
     running = live_session_ids()
     closed = closed_workspaces()
@@ -2439,6 +2597,10 @@ def cmd_doctor(argv):
         print(f"  {mark} {ref:<13} {e['title'][:38]:<40}"
               f" {', '.join(issues) or 'ok'}")
     print(f"\n  {len(entries) - bad}/{len(entries)} restorable\n")
+    # Nonzero means "needs attention", not "unrestorable": a scan-derived id
+    # and a changed checkout are warnings. Something you can put in a health
+    # check has to be able to say so.
+    return 1 if bad else 0
 
 
 def cmd_rebuild(argv):
@@ -2454,7 +2616,7 @@ def cmd_rebuild(argv):
     lost = [e for e in entries if e.get("workspace_id") not in before]
     if not lost:
         print("  nothing to rebuild — every parked workspace is still open\n")
-        return
+        return 0
 
     # A workspace the user closed on purpose is not a workspace cmux lost, and
     # the ledger cannot tell them apart — both leave an entry pointing at
@@ -2475,7 +2637,7 @@ def cmd_rebuild(argv):
         lost = keep
         if not lost:
             print()
-            return
+            return 1        # every one was a workspace the user closed
 
     # rebuild is the obvious command to reach for and the wrong one after a
     # cmux reset: the workspaces are still there under new uuids, so this would
@@ -2492,12 +2654,14 @@ def cmd_rebuild(argv):
         print(f"\n  {len(adoptable)} entr(ies) look like they only lost their "
               "uuid — run `park rekey` first (`park rekey --dry-run` to look), "
               "then rebuild what is left\n")
-        return
+        return 1
 
+    stuck = 0
     for e in lost:
         title = e["title"]
         if not e.get("cwd") or not Path(e["cwd"]).exists():
             print(f"  skip  {title[:40]} — cwd gone")
+            stuck += 1
             continue
         if dry:
             print(f"  would rebuild  {title[:44]}  ({e['cwd']})")
@@ -2516,6 +2680,7 @@ def cmd_rebuild(argv):
         ok = cmux_do(*args)
         if not ok:
             print(f"  FAILED  {title[:44]} — cmux would not create it")
+            stuck += 1
             continue
 
         # new-workspace prints no id, so find the workspace it just made and
@@ -2534,6 +2699,7 @@ def cmd_rebuild(argv):
         if len(candidates) != 1:
             print(f"  rebuilt  {title[:44]} — but could not identify the new "
                   f"workspace; entry left under {old_id}")
+            stuck += 1
             continue
         new = candidates[0]
         # The surfaces died with the old workspace, so their ids would target
@@ -2548,6 +2714,7 @@ def cmd_rebuild(argv):
             ledger_path(old_id).unlink(missing_ok=True)
         print(f"  rebuilt  {title[:44]}  → {new['ref']}")
     print()
+    return 1 if stuck else 0
 
 
 def rekey_match(entry, spaces, unavailable):
@@ -2627,7 +2794,7 @@ def cmd_rekey(argv):
     if not orphans:
         print("  nothing to re-key — every parked entry still names a live "
               "workspace\n")
-        return
+        return 1 if shut else 0
 
     done, stuck = 0, 0
     for e in orphans:
@@ -2673,9 +2840,10 @@ def cmd_rekey(argv):
     print(f"\n  {verb} {done}, {stuck} left for `park rebuild`")
     if not dry and done:
         print("  the typed `park unpark .` prefill did not survive the reset — "
-              "resume these by name\n")
+              "resume these by name, or put it back with `park repaint`\n")
     else:
         print()
+    return 1 if stuck or shut else 0
 
 
 def cmd_repaint(argv):
@@ -3025,6 +3193,10 @@ def _picker(stdscr, rows, ws_by_ref, reload):
                 tail, attr = job["verb"] + "…", C(3)
             elif job and job.get("ok") is False:
                 mark, tail, attr = "✗", job.get("msg", "failed")[:24], C(2)
+            elif r["conflict"]:
+                # Enter still unparks it, which is exactly right: that path
+                # clears the stale entry instead of resuming anything.
+                mark, tail, attr = "⚠", "parked, but live", C(2)
             elif r["busy"]:
                 mark, tail, attr = "●", r["state"][:24], C(2)
             elif r["parked"]:
@@ -3152,6 +3324,8 @@ USAGE = """park — free RAM from idle cmux workspaces without closing them
   park ls                      what is parked / what is live and parkable
   park .                       park the workspace you are in
   park park <target>...        park workspace(s). --dry-run, overrides below
+  park park --idle 3d          park everything idle that long (asks first)
+  park park --all              park everything parkable (asks first)
   park unpark <target>...      resume a parked workspace
   park show <target>           dump the ledger entry
   park forget <target>         drop a stale ledger entry without resuming
@@ -3166,7 +3340,12 @@ targets:  workspace:12 | <uuid> | <title substring> | window:2 | .
 
 overrides: --force        waive the CPU sample (corroboration only)
            --kill-anyway  waive the draft guard and the in-flight verdict too;
-                          asks for confirmation, needs a terminal
+                          asks for confirmation, needs a terminal. Never
+                          together with --all or --idle
+
+exit code: 0 when every target reached the state you asked for (an already
+parked workspace counts), 1 when any was refused. `park doctor` exits 1 when
+any entry needs attention.
 
 Never parks a workspace whose turn is in flight, and never parks the session
 park itself is running in. Parking stops the claude session, its dev servers
@@ -3177,7 +3356,7 @@ servers yourself.
 
 KNOWN_FLAGS = {
     "ls": ("--json",), "list": ("--json",),
-    "park": ("--dry-run", "--force", "--kill-anyway"),
+    "park": ("--dry-run", "--force", "--kill-anyway", "--idle", "--all"),
     "pick": (), "unpark": (), "resume": (), "show": (),
     "forget": (), "doctor": (), "rebuild": ("--dry-run", "--closed"),
     "rekey": ("--dry-run",), "repaint": ("--dry-run",),
@@ -3212,10 +3391,15 @@ def main():
     # Unrecognised flags used to be filtered out silently alongside the real
     # ones, so `park park ws:12 --dry-rnu` dropped the typo and actually parked.
     unknown = [a for a in rest
-               if a.startswith("--") and a not in KNOWN_FLAGS.get(cmd, ())]
+               if a.startswith("--") and a.split("=")[0]
+               not in KNOWN_FLAGS.get(cmd, ())]
     if unknown:
         die(f"unknown option {unknown[0]!r} for `park {cmd}`\n\n{USAGE}")
-    table[cmd](rest)
+    # Commands report whether every target reached the state that was asked
+    # for. `park .` bound to a keyboard shortcut does not care, but anything
+    # scripted — a health check calling `park doctor`, a `park . && …` — has no
+    # other way to find out, and a tool that always exits 0 reads as "fine".
+    sys.exit(table[cmd](rest) or 0)
 
 
 if __name__ == "__main__":
