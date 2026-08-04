@@ -61,6 +61,10 @@ APPLE_EPOCH = 978307200
 # A ledger claim lock is held for milliseconds; older than this it belongs to a
 # park that was killed mid-write, and reclaiming it is the only way back.
 LOCK_STALE_SECONDS = 60.0
+# The operation lock is held for a whole park or unpark — a CPU window, a kill
+# and a wait for the session to come up — so it gets a much longer rope. It is
+# normally released by its owner dying, not by this timeout.
+OP_LOCK_STALE_SECONDS = 300.0
 # How stale cmd_park lets its process snapshot get before re-taking it, so a
 # session started during a long batch cannot be missed by classify().
 SNAPSHOT_MAX_AGE = 5.0
@@ -381,10 +385,15 @@ def read_env(pids):
                 pid = int(head[0])
             except ValueError:
                 continue
-            w = re.search(r"CMUX_WORKSPACE_ID=(\S+)", line)
-            s = re.search(r"CMUX_SURFACE_ID=(\S+)", line)
-            out[pid] = {"workspace": w.group(1) if w else None,
-                        "surface": s.group(1) if s else None}
+            # `ps -E` prints argv and THEN the environment, with nothing
+            # marking the boundary — so a process whose own command line
+            # mentions CMUX_WORKSPACE_ID (an echo, a script, park's own test
+            # harness) would be attributed to whatever it named. The last
+            # occurrence is the environment's.
+            w = re.findall(r"CMUX_WORKSPACE_ID=(\S+)", line)
+            s = re.findall(r"CMUX_SURFACE_ID=(\S+)", line)
+            out[pid] = {"workspace": w[-1] if w else None,
+                        "surface": s[-1] if s else None}
     return out
 
 
@@ -908,6 +917,66 @@ def ledger_path(ws_id):
     if not re.fullmatch(r"[A-Za-z0-9._-]+", str(ws_id or "")):
         die(f"refusing to use {ws_id!r} as a ledger key")
     return LEDGER / f"{ws_id}.json"
+
+
+def op_lock_path(ws_id):
+    return ledger_path(ws_id).with_suffix(".op.lock")
+
+
+def stale_op_lock(path):
+    """Is this lock a corpse? Its owner is gone, or it is impossibly old."""
+    try:
+        owner = int((path.read_text().strip() or "0").split()[0])
+        age = time.time() - path.stat().st_mtime
+    except (OSError, ValueError, IndexError):
+        return True                       # unreadable: nothing to wait for
+    if age > OP_LOCK_STALE_SECONDS:
+        return True
+    if not owner or owner == os.getpid():
+        return False
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    return False
+
+
+def acquire_op_lock(ws_id):
+    """One park or unpark per workspace at a time. -> path, or None if busy.
+
+    Claiming the LEDGER ENTRY is not enough, because park publishes that entry
+    BEFORE it kills anything. In that window an unpark of the same workspace
+    reads it, sees every session still live, takes the "already running" path
+    and deletes the entry — and then park kills the sessions whose only resume
+    record has just been removed. Two unparks in parallel are the same story
+    from the other side: both read the entry, both send the resume command, two
+    processes end up appending to one transcript.
+
+    Held for the whole transaction, so it has to survive a park that was
+    SIGKILLed mid-run: the owner pid is written into it, and a lock whose owner
+    is gone is not a lock.
+    """
+    ensure_ledger_dir()
+    path = op_lock_path(ws_id)
+    for attempt in (0, 1):
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if attempt or not stale_op_lock(path):
+                return None
+            path.unlink(missing_ok=True)
+            continue
+        with os.fdopen(fd, "w") as fh:
+            fh.write(str(os.getpid()))
+        return path
+    return None
+
+
+def release_op_lock(path):
+    if path:
+        Path(path).unlink(missing_ok=True)
 
 
 def read_entry(path):
@@ -1568,6 +1637,26 @@ def busy_verdict(state, sessions):
 
 def park_one(w, by_ws, table, dry=False, force=False, brutal=False,
              snaps=None):
+    """Park one workspace, alone. See `_park_one` for what that involves.
+
+    A dry run reads and reports, so it needs no lock; everything else holds the
+    workspace for the whole transaction.
+    """
+    if dry:
+        return _park_one(w, by_ws, table, True, force, brutal, snaps)
+    lock = acquire_op_lock(w["id"])
+    if not lock:
+        return {"ref": w["ref"], "title": w.get("title") or "", "ok": False,
+                "freed": 0, "notes": [],
+                "msg": "another park or unpark is working on this workspace"}
+    try:
+        return _park_one(w, by_ws, table, False, force, brutal, snaps)
+    finally:
+        release_op_lock(lock)
+
+
+def _park_one(w, by_ws, table, dry=False, force=False, brutal=False,
+              snaps=None):
     """Park one workspace. Returns a result dict; prints nothing.
 
     Silence matters: the picker calls this from a worker thread while curses
@@ -1790,19 +1879,31 @@ def restore_visual_state(ws_id, entry):
     Shared with `forget`, which used to clear the colour outright — destroying
     the original in the same breath as the ledger entry holding the only record
     of it.
+
+    Returns a note when cmux would not take one of them back, else None. The
+    caller is about to delete the entry, and with it the only record that this
+    workspace was ever, say, orange: a socket hiccup here used to lose that
+    silently and leave the workspace dimmed and pilled with nothing saying why.
     """
-    cmux_do("clear-status", PILL_KEY, "--workspace", ws_id)
+    failed = []
+    if not cmux_do("clear-status", PILL_KEY, "--workspace", ws_id):
+        failed.append("the parked pill")
     prev = entry.get("prev_color")
     if prev:
-        cmux_do("workspace-action", "--action", "set-color",
-                "--color", prev, "--workspace", ws_id)
-    else:
-        cmux_do("workspace-action", "--action", "clear-color",
-                "--workspace", ws_id)
+        if not cmux_do("workspace-action", "--action", "set-color",
+                       "--color", prev, "--workspace", ws_id):
+            failed.append(f"the colour it had ({prev})")
+    elif not cmux_do("workspace-action", "--action", "clear-color",
+                     "--workspace", ws_id):
+        failed.append("the parked colour")
     # Only undo a rename we made ourselves; a name the user set is theirs.
-    if entry.get("pinned_title"):
-        cmux_do("workspace-action", "--action", "clear-name",
-                "--workspace", ws_id)
+    if entry.get("pinned_title") and not cmux_do(
+            "workspace-action", "--action", "clear-name", "--workspace", ws_id):
+        failed.append("the pinned name")
+    if failed:
+        return ("cmux would not restore " + ", ".join(failed)
+                + " — set it back by hand")
+    return None
 
 
 def pin_title(w, title):
@@ -1921,6 +2022,19 @@ def wait_for_sessions(ids, timeout=8.0, step=0.4):
 
 
 def unpark_one(w, allow_exec=False, live_ids=None):
+    """Resume one parked workspace, alone. See `_unpark_one`."""
+    lock = acquire_op_lock(w["id"])
+    if not lock:
+        return {"ref": w["ref"], "title": w.get("title") or "", "ok": False,
+                "notes": [],
+                "msg": "another park or unpark is working on this workspace"}
+    try:
+        return _unpark_one(w, allow_exec, live_ids)
+    finally:
+        release_op_lock(lock)
+
+
+def _unpark_one(w, allow_exec=False, live_ids=None):
     """Resume one parked workspace. Returns a result dict; prints nothing.
 
     `allow_exec` is for `park unpark .` run inside the very workspace being
@@ -1984,7 +2098,9 @@ def unpark_one(w, allow_exec=False, live_ids=None):
         # the rest of the teardown, or the pill, the colour and the pinned
         # title stick around forever and every later unpark refuses too.
         clear_prefill(w["id"], e["sessions"])
-        restore_visual_state(w["id"], e)
+        note = restore_visual_state(w["id"], e)
+        if note:
+            res["notes"].append(note)
         path.unlink()
         res["ok"] = True
         res["msg"] = f"already running ({dupes[0][:8]}) — cleared parked state"
@@ -2104,7 +2220,9 @@ def unpark_one(w, allow_exec=False, live_ids=None):
         res["msg"] = (f"{len(done - unconfirmed) + bool(here)} tab(s) resumed, "
                       f"{len(left)} still parked (ledger at {path})")
     else:
-        restore_visual_state(w["id"], e)
+        note = restore_visual_state(w["id"], e)
+        if note:
+            res["notes"].append(note)
         path.unlink()
         res["ok"] = True
         res["msg"] = "resumed"
@@ -2232,17 +2350,34 @@ def cmd_forget(argv):
     Differs from unpark only in not sending the resume commands: the pill, the
     colour and the pre-filled prompt are torn down exactly the same way.
     """
-    for w in targets_from(argv):
+    dropped = 0
+    targets = targets_from(argv)
+    for w in targets:
         path = ledger_path(w["id"])
         if not path.exists():
             print(f"  skip  {w['ref']}  — not parked")
             continue
-        e = read_entry(path) or {}
-        clear_prefill(w["id"], e.get("sessions", []))
-        restore_visual_state(w["id"], e)
-        path.unlink()
+        # The same lock park and unpark take: this deletes the entry, and
+        # deleting it out from under a park that is mid-kill leaves the session
+        # dead with no record of how to bring it back.
+        lock = acquire_op_lock(w["id"])
+        if not lock:
+            print(f"  skip  {w['ref']}  — another park or unpark is working "
+                  "on this workspace")
+            continue
+        try:
+            e = read_entry(path) or {}
+            clear_prefill(w["id"], e.get("sessions", []))
+            note = restore_visual_state(w["id"], e)
+            path.unlink()
+        finally:
+            release_op_lock(lock)
+        dropped += 1
         print(f"  forgot  {w['ref']}  {(w['title'] or '')[:40]}")
+        if note:
+            print(f"          {note}")
     print()
+    return 0 if dropped == len(targets) else 1
 
 
 def cmd_doctor(argv):
@@ -2313,8 +2448,10 @@ def cmd_rebuild(argv):
     every parked workspace can still be reconstructed from here.
     """
     dry = "--dry-run" in argv
-    before = {w["id"] for w in all_workspaces()}
-    lost = [e for e in read_ledger() if e.get("workspace_id") not in before]
+    spaces = all_workspaces()
+    before = {w["id"] for w in spaces}
+    entries = read_ledger()
+    lost = [e for e in entries if e.get("workspace_id") not in before]
     if not lost:
         print("  nothing to rebuild — every parked workspace is still open\n")
         return
@@ -2339,6 +2476,24 @@ def cmd_rebuild(argv):
         if not lost:
             print()
             return
+
+    # rebuild is the obvious command to reach for and the wrong one after a
+    # cmux reset: the workspaces are still there under new uuids, so this would
+    # build a SECOND one beside each of them — 45 duplicates, measured. The
+    # docs said "run rekey first"; nothing enforced it. Now the entries that
+    # rekey could place are held back rather than duplicated.
+    claimed = {e["workspace_id"] for e in entries
+               if e.get("workspace_id") in before}
+    adoptable = [e for e in lost if rekey_match(e, spaces, claimed)[0]]
+    if adoptable:
+        for e in adoptable:
+            print(f"  hold  {(e.get('title') or '')[:44]:<46} a live workspace "
+                  "already carries this title")
+        print(f"\n  {len(adoptable)} entr(ies) look like they only lost their "
+              "uuid — run `park rekey` first (`park rekey --dry-run` to look), "
+              "then rebuild what is left\n")
+        return
+
     for e in lost:
         title = e["title"]
         if not e.get("cwd") or not Path(e["cwd"]).exists():
@@ -2445,6 +2600,12 @@ def cmd_rekey(argv):
         live_by_id = {w["id"] for w in spaces}
         entries = read_ledger()
         orphans = [e for e in entries if e.get("workspace_id") not in live_by_id]
+        # An entry whose workspace the user CLOSED is not an entry that lost
+        # its uuid. Adopting it would mark some unrelated live workspace as
+        # parked because the two happen to share a title.
+        closed = closed_workspaces()
+        shut = [e for e in orphans if closed.get(e.get("workspace_id"))]
+        orphans = [e for e in orphans if not closed.get(e.get("workspace_id"))]
         # Never adopt a workspace another entry already claims, and never adopt
         # one with a claude running in it: that would mark a workspace the user
         # is working in as parked, and the next unpark would start a second
@@ -2456,6 +2617,12 @@ def cmd_rekey(argv):
             for w in spaces:
                 if classify(by_ws.get(w["id"], []), table)[0]:
                     unavailable.add(w["id"])
+
+    for e in shut:
+        when = ago(datetime.fromtimestamp(closed[e["workspace_id"]],
+                                          timezone.utc).isoformat())
+        print(f"  skip     {(e.get('title') or '')[:44]:<46} workspace was "
+              f"closed {when} — drop it with `park forget`")
 
     if not orphans:
         print("  nothing to re-key — every parked entry still names a live "

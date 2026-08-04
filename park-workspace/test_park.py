@@ -292,6 +292,107 @@ class TestLedgerClaim(unittest.TestCase):
         self.assertEqual(p.stat().st_mode & 0o077, 0)
 
 
+class TestOpLock(unittest.TestCase):
+    """Claiming the entry is not enough: park publishes it BEFORE it kills."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.real = park.LEDGER
+        park.LEDGER = Path(self.dir.name)
+        self.addCleanup(lambda: setattr(park, "LEDGER", self.real))
+
+    def test_a_second_operation_on_the_same_workspace_is_refused(self):
+        first = park.acquire_op_lock("ws-one")
+        self.assertIsNotNone(first)
+        self.assertIsNone(park.acquire_op_lock("ws-one"))
+        park.release_op_lock(first)
+        self.assertIsNotNone(park.acquire_op_lock("ws-one"))
+
+    def test_another_workspace_is_not_blocked(self):
+        park.acquire_op_lock("ws-one")
+        self.assertIsNotNone(park.acquire_op_lock("ws-two"))
+
+    def test_a_lock_whose_owner_is_gone_is_reclaimed(self):
+        p = park.op_lock_path("ws-one")
+        p.write_text("999999")            # a pid that cannot be running
+        self.assertIsNotNone(park.acquire_op_lock("ws-one"))
+
+    def test_an_ancient_lock_is_reclaimed(self):
+        p = park.op_lock_path("ws-one")
+        p.write_text(str(os.getpid()))
+        old = time.time() - park.OP_LOCK_STALE_SECONDS - 60
+        os.utime(p, (old, old))
+        self.assertIsNotNone(park.acquire_op_lock("ws-one"))
+
+    def test_the_lock_is_not_mistaken_for_a_ledger_entry(self):
+        park.acquire_op_lock("ws-one")
+        self.assertEqual(park.read_ledger(), [])
+
+
+class TestRestoreVisualState(unittest.TestCase):
+    def setUp(self):
+        self.real = park.cmux_do
+        self.addCleanup(lambda: setattr(park, "cmux_do", self.real))
+
+    def test_silence_when_everything_went_back(self):
+        park.cmux_do = lambda *a: True
+        self.assertIsNone(park.restore_visual_state("ws", {"prev_color": "Red"}))
+
+    def test_a_failure_names_the_colour_the_entry_is_about_to_take_away(self):
+        park.cmux_do = lambda *a: False
+        note = park.restore_visual_state("ws", {"prev_color": "Red"})
+        self.assertIn("Red", note)
+
+
+class TestRebuildHoldsBackWhatRekeyCouldPlace(unittest.TestCase):
+    """After a cmux reset `rebuild` would build a duplicate of every survivor."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.real = {k: getattr(park, k) for k in
+                     ("LEDGER", "all_workspaces", "cmux_do")}
+        park.LEDGER = Path(self.dir.name)
+        self.made = []
+        park.cmux_do = lambda *a: self.made.append(a) or True
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        for k, v in self.real.items():
+            setattr(park, k, v)
+
+    def entry(self, title, ws_id):
+        park.write_entry(park.ledger_path(ws_id),
+                         {"workspace_id": ws_id, "title": title,
+                          "cwd": self.dir.name, "sessions": []})
+
+    def run_rebuild(self):
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            park.cmd_rebuild([])
+        return out.getvalue()
+
+    def test_an_entry_whose_title_is_live_under_a_new_uuid_is_held(self):
+        self.entry("api-worker", "OLD-UUID")
+        park.all_workspaces = lambda: [
+            {"id": "NEW-UUID", "ref": "workspace:1", "title": "api-worker",
+             "current_directory": self.dir.name, "window_id": "w"}]
+        out = self.run_rebuild()
+        self.assertIn("park rekey", out)
+        self.assertEqual(self.made, [], "it created a duplicate workspace")
+
+    def test_a_genuinely_lost_entry_is_still_rebuilt(self):
+        self.entry("gone-for-good", "OLD-UUID")
+        park.all_workspaces = lambda: [
+            {"id": "NEW-UUID", "ref": "workspace:1", "title": "something else",
+             "current_directory": self.dir.name, "window_id": "w"}]
+        out = self.run_rebuild()
+        self.assertNotIn("park rekey", out)
+        self.assertTrue(any("new-workspace" in a for a in self.made))
+
+
 class TestUnparkKeepsWhatItOwes(unittest.TestCase):
     """The ledger holds the ONLY copy of a session id and its resume command.
 
