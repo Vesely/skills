@@ -1414,6 +1414,39 @@ def prompt_line(ws_id, surface=None):
     return ""
 
 
+# Glyphs a shell prompt ends with. The first group cannot be anything else on
+# a line; `$ % #` can — `echo $` ends in one — so they need corroboration.
+PROMPT_GLYPHS = "❯»➜›"
+AMBIGUOUS_GLYPHS = "$%#"
+# What a prompt puts before `$`: a path, or user@host, or nothing at all.
+PROMPT_CONTEXT = "/~@:"
+
+
+def bare_prompt(line):
+    """Is this a shell prompt with nothing typed after it?
+
+    Used before typing anything into a surface. The two ways of being wrong are
+    not equal: refusing a real prompt loses a re-typed prefill, which `repaint`
+    prints and anyone can redo, while accepting a line that has text on it
+    appends to the user's half-written command and presses enter. So it refuses
+    whenever it cannot tell.
+
+    That is why `$ % #` need a path- or host-looking token in front of them:
+    `~/Sites/x $` is a prompt, `echo $` is a command someone is in the middle
+    of typing, and the naive "last character is a glyph" test called both bare.
+    """
+    if not line:
+        return False
+    line = line.rstrip()
+    last = line[-1:]
+    if last in PROMPT_GLYPHS:
+        return True
+    if last not in AMBIGUOUS_GLYPHS:
+        return False
+    before = line[:-1].strip()
+    return not before or any(c in before for c in PROMPT_CONTEXT)
+
+
 def unsent_input(ws_id, surface=None):
     """Text the user typed but has not submitted, or messages queued behind the
     turn. Killing the session throws both away with no record anywhere.
@@ -1446,7 +1479,7 @@ def unsent_input(ws_id, surface=None):
     return ""
 
 
-def live_session_ids(table=None):
+def live_session_ids(table=None, unresolved=None):
     """Session ids of every claude process running right now.
 
     argv alone stopped being enough. cmux 0.64 restores an agent as plain
@@ -1460,6 +1493,15 @@ def live_session_ids(table=None):
     So anything without an id in argv gets resolved the expensive way, off the
     transcript it holds open. That costs an lsof per such process, which is why
     callers pass the result around instead of recomputing it per workspace.
+
+    Ids come back lowercased: cmux writes uppercase uuids in places and the
+    ledger records whatever the source gave, so a case-sensitive `in` test was
+    a guard that could quietly match nothing.
+
+    Even the expensive path can fail — lsof denied, cwd unreadable — and a
+    session missed here is a session unpark will start a SECOND process on.
+    Pass `unresolved` a list to be told which pids those were; the caller can
+    then say so out loud instead of the guard failing open in silence.
     """
     table = table if table is not None else ps_table()
     ids = set()
@@ -1471,7 +1513,9 @@ def live_session_ids(table=None):
         if not sid:
             sid, _, _ = session_id_of(pid, proc_cwd(pid))
         if sid:
-            ids.add(sid)
+            ids.add(sid.lower())
+        elif unresolved is not None:
+            unresolved.append(pid)
     return ids
 
 
@@ -1793,6 +1837,10 @@ def clear_prefill(ws_id, sessions):
     Returns False when a surface's screen could not be read at all, so a caller
     about to type onto that prompt can decline rather than append to whatever
     is sitting there.
+
+    Teardown only — `forget` and the already-running path, which type nothing
+    afterwards. Anything that goes on to send a command must use
+    `prepare_prompt`, which also insists the line ends up EMPTY.
     """
     ok = True
     for s in sessions:
@@ -1802,11 +1850,74 @@ def clear_prefill(ws_id, sessions):
             continue
         if not line.endswith(PREFILL):
             continue
-        keys = ["send-key", "--workspace", ws_id]
-        if s.get("surface"):
-            keys += ["--surface", s["surface"]]
-        cmux_do(*keys, "ctrl+u")
+        if not send_ctrl_u(ws_id, s.get("surface")):
+            ok = False
     return ok
+
+
+def send_ctrl_u(ws_id, surface=None):
+    keys = ["send-key", "--workspace", ws_id]
+    if surface:
+        keys += ["--surface", surface]
+    return cmux_do(*keys, "ctrl+u")
+
+
+def prepare_prompt(ws_id, surface=None):
+    """Make a prompt safe to type a resume command onto. -> (ok, why)
+
+    unpark types and then presses ENTER, so "the line is not park's prefill"
+    was never enough. If the prefill was already gone — a cmux restart wipes
+    the terminal buffer, and `repaint` only puts it back where the line was
+    bare — and the user has `git status` half typed, the old code left the line
+    alone, reported success and appended the resume command to it. The result
+    ran neither: one mangled command, no session, and the ledger entry deleted
+    on the way out.
+
+    So: clear our own prefill, re-read, and require what remains to be a bare
+    prompt. Anything else is the user's line, and refusing costs nothing but a
+    retry.
+    """
+    line = prompt_line(ws_id, surface)
+    if line is None:
+        return False, "cannot read the prompt"
+    if line.endswith(PREFILL):
+        if not send_ctrl_u(ws_id, surface):
+            return False, "cmux would not clear the prefilled line"
+        line = prompt_line(ws_id, surface)
+        if line is None:
+            return False, "cannot read the prompt after clearing it"
+    if not bare_prompt(line):
+        return False, f"something is typed at the prompt: {line[-40:]!r}"
+    return True, None
+
+
+def wait_for_sessions(ids, timeout=8.0, step=0.4):
+    """Which of these session ids now have a live claude process.
+
+    `cmux send` returning success means the keystrokes landed, not that
+    anything started: a bad cwd, a shim that is gone, or claude refusing to
+    start all leave a workspace at a shell prompt — and unpark used to delete
+    the ledger entry on the strength of the send alone, taking the session id
+    and resume command with it.
+
+    Cheap on purpose: the command we sent carries `--resume <id>` in its argv,
+    so this is a `ps` sweep with no lsof behind it, and it returns the moment
+    everything is up.
+    """
+    want = {str(i).lower() for i in ids}
+    seen = set()
+    deadline = time.time() + timeout
+    while True:
+        for info in ps_table().values():
+            cmd = info.get("cmd") or ""
+            if not is_claude(cmd):
+                continue
+            sid = argv_session_id(cmd)
+            if sid and sid.lower() in want:
+                seen.add(sid.lower())
+        if not want - seen or time.time() >= deadline:
+            return seen
+        time.sleep(step)
 
 
 def unpark_one(w, allow_exec=False, live_ids=None):
@@ -1862,7 +1973,10 @@ def unpark_one(w, allow_exec=False, live_ids=None):
     # Never resume a conversation that is already live: two processes
     # appending to one transcript corrupts it.
     running = live_session_ids() if live_ids is None else live_ids
-    dupes = [s["session_id"] for s in e["sessions"] if s["session_id"] in running]
+    # Lowercased on both sides: `live_session_ids` normalises, and a ledger
+    # entry records whatever spelling its source used.
+    dupes = [s["session_id"] for s in e["sessions"]
+             if str(s.get("session_id") or "").lower() in running]
     if dupes and len(dupes) == len(e["sessions"]):
         # Every session is back, so the workspace is not parked any more —
         # whatever resumed it, the ledger and the sidebar are now lying. Skip
@@ -1931,34 +2045,77 @@ def unpark_one(w, allow_exec=False, live_ids=None):
                 f"tab {idx} needs a new agent tab; resume it with: "
                 + resume_command_for(s))
             continue
-        # Park pre-filled a command at this prompt; clear the line first or the
-        # replay concatenates onto it. A prompt that cannot even be read is not
-        # one to type a command onto and press enter.
-        if not clear_prefill(w["id"], [s]):
-            return gave_up("cannot read the prompt"
-                           + (f" of {surface}" if surface else ""))
+        # The line has to be EMPTY before a command is typed and submitted —
+        # park's own prefill cleared, and anything else left strictly alone.
+        ok, why = prepare_prompt(w["id"], surface)
+        if not ok:
+            if why.startswith("cannot read"):
+                # Measured: 6 of 34 parked workspaces answer `read-screen` with
+                # "Failed to read terminal text" — the surface ids are valid and
+                # the workspace is open, cmux just will not hand over the
+                # buffer. Typing blind into that is the one thing this guard
+                # exists to prevent, so say what does work instead.
+                res["notes"].append(
+                    "cmux would not read this terminal; open the workspace once "
+                    "and retry, or restore the tab directly with: "
+                    f"cmux restore claude {s['session_id']}")
+            return gave_up(why + (f" of {surface}" if surface else ""))
         if not send_text(resume_command_for(s), w["id"], surface, submit=True):
             return gave_up("cmux would not accept the resume command"
                            + (f" for {surface}" if surface else ""))
         sent += 1
         done.add(s["session_id"])
 
-    restore_visual_state(w["id"], e)
-    path.unlink()
+    # Keystrokes landing is not a session starting: a stale cwd, a shim that
+    # moved or claude refusing to start all leave the tab at a shell prompt.
+    # Anything not confirmed keeps its ledger record — that record is the only
+    # copy of the session id and the command that brings it back.
+    unconfirmed = set()
+    if done:
+        up = wait_for_sessions(done)
+        unconfirmed = {sid for sid in done if str(sid).lower() not in up}
+        if unconfirmed:
+            res["notes"].append(
+                f"{len(unconfirmed)} tab(s) were sent their resume command but "
+                "no process appeared — left parked; if one did come up, clear "
+                "it with `park forget`")
+
+    # `here` is handed the terminal by exec below, so it is accounted for even
+    # though nothing can confirm it from inside the process being replaced.
+    left = [s for s in e["sessions"]
+            if s is not here
+            and (s["session_id"] not in done or s["session_id"] in unconfirmed)]
+
+    # What the caller must add to its "already running" set before the next
+    # target: these transcripts have a process on them as of now.
+    res["resumed_ids"] = sorted(done - unconfirmed)
 
     killed = e.get("killed", [])
     if killed:
         res["notes"].append(f"{len(killed)} dev/browser process(es) were "
                             f"stopped and are NOT restarted")
-    res["ok"] = True
-    res["msg"] = "resumed"
+    if left:
+        # Some tabs are still owed. Deleting the entry here would take their
+        # resume commands with it — and `res["notes"]` is not a place to keep
+        # them: with exec below, cmd_unpark never gets to print them.
+        e["sessions"] = left
+        write_entry(path, e)
+        res["ok"] = bool(done - unconfirmed) or bool(here)
+        res["msg"] = (f"{len(done - unconfirmed) + bool(here)} tab(s) resumed, "
+                      f"{len(left)} still parked (ledger at {path})")
+    else:
+        restore_visual_state(w["id"], e)
+        path.unlink()
+        res["ok"] = True
+        res["msg"] = "resumed"
 
     if here:
         # Everything above is durable; hand this terminal straight to claude.
-        # resume_command_for already applied the shim.
-        cmd = resume_command_for(here)
-        sys.stdout.flush()
-        os.execvp("/bin/sh", ["/bin/sh", "-c", cmd])
+        # resume_command_for already applied the shim. The exec is the CALLER's
+        # to run: it never returns, and doing it here meant the notes above —
+        # including "tab 2 needs a new agent tab; resume it with: …" — were
+        # printed by nobody.
+        res["exec"] = resume_command_for(here)
     return res
 
 
@@ -2031,15 +2188,33 @@ def cmd_unpark(argv):
     targets = targets_from(argv)
     # Resolved once: with cmux no longer putting the id in argv this costs an
     # lsof per live claude, and it is the same answer for every target.
+    unresolved = []
     with Spinner("checking which sessions are already running…"):
-        live_ids = live_session_ids()
+        live_ids = live_session_ids(unresolved=unresolved)
+    if unresolved:
+        # The guard fails open, so say so. A session it could not identify is
+        # one unpark may start a second process on.
+        print(f"  warning: {len(unresolved)} running claude process(es) could "
+              "not be identified; the already-running check cannot see them")
+    resumed = 0
     for w in targets:
         r = unpark_one(w, allow_exec=len(targets) == 1, live_ids=live_ids)
         mark = "▶" if r["ok"] else "skip"
         print(f"  {mark:<5} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
         for n in r["notes"]:
             print(f"        {n}")
+        resumed += bool(r["ok"])
+        # A batch resumes sessions as it goes; without this the guard would
+        # still be answering from the snapshot taken before any of them existed.
+        live_ids |= {str(i).lower() for i in r.get("resumed_ids", ())}
+        if r.get("exec"):
+            # Handing this terminal over ends the batch by definition, so
+            # everything above has already been printed.
+            print()
+            sys.stdout.flush()
+            os.execvp("/bin/sh", ["/bin/sh", "-c", r["exec"]])
     print()
+    return 0 if resumed == len(targets) else 1
 
 
 def cmd_show(argv):
@@ -2334,19 +2509,6 @@ def cmd_rekey(argv):
               "resume these by name\n")
     else:
         print()
-
-
-PROMPT_GLYPHS = "❯>$%#»➜"
-
-
-def bare_prompt(line):
-    """Is this a shell prompt with nothing typed after it?
-
-    Used before typing anything into a surface. Refusing when unsure is the
-    point: appending to a half-written command is silent and the user's text
-    is the only copy.
-    """
-    return bool(line) and line.rstrip()[-1:] in PROMPT_GLYPHS
 
 
 def cmd_repaint(argv):

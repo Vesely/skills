@@ -292,6 +292,94 @@ class TestLedgerClaim(unittest.TestCase):
         self.assertEqual(p.stat().st_mode & 0o077, 0)
 
 
+class TestUnparkKeepsWhatItOwes(unittest.TestCase):
+    """The ledger holds the ONLY copy of a session id and its resume command.
+
+    Deleting it is only ever right once every tab it names is actually back.
+    """
+
+    WS = {"id": "ws-one", "ref": "workspace:1", "title": "demo"}
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.tmp = Path(self.dir.name)
+        self.real = {k: getattr(park, k) for k in
+                     ("LEDGER", "prompt_line", "cmux_do", "send_text",
+                      "wait_for_sessions", "git_info", "restore_visual_state")}
+        park.LEDGER = self.tmp / "ledger"
+        park.prompt_line = lambda ws, s=None: "~/x ❯ "
+        park.cmux_do = lambda *a: True
+        park.send_text = lambda *a, **k: True
+        park.git_info = lambda cwd: {}
+        park.restore_visual_state = lambda ws, e: True
+        self.confirm = True
+        park.wait_for_sessions = lambda ids, **k: (
+            {str(i).lower() for i in ids} if self.confirm else set())
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        for k, v in self.real.items():
+            setattr(park, k, v)
+
+    def entry(self, n):
+        """A parked entry for `n` tabs of a REBUILT workspace (no surfaces)."""
+        sessions = []
+        for i in range(n):
+            t = self.tmp / f"s{i}.jsonl"
+            t.write_text("{}")
+            sessions.append({"session_id": f"0000000{i}-1111-2222-3333-"
+                                           "444444444444",
+                             "transcript": str(t), "cwd": str(self.tmp),
+                             "resume_command": f"cd x && claude --resume s{i}",
+                             "surface": ""})
+        e = {"workspace_id": "ws-one", "workspace_ref": "workspace:1",
+             "title": "demo", "cwd": str(self.tmp), "sessions": sessions,
+             "git": {}, "killed": []}
+        park.write_entry(park.ledger_path("ws-one"), e)
+        return e
+
+    def test_a_single_confirmed_tab_clears_the_entry(self):
+        self.entry(1)
+        res = park.unpark_one(self.WS, live_ids=set())
+        self.assertTrue(res["ok"], res["msg"])
+        self.assertFalse(park.ledger_path("ws-one").exists())
+
+    def test_the_tab_that_needs_a_new_pane_stays_in_the_ledger(self):
+        # A rebuilt workspace has one surface, so only the first session can be
+        # resumed. The rest used to be mentioned in a note and then deleted.
+        self.entry(2)
+        res = park.unpark_one(self.WS, live_ids=set())
+        left = park.read_entry(park.ledger_path("ws-one"))
+        self.assertIsNotNone(left, "the entry was deleted")
+        self.assertEqual(len(left["sessions"]), 1)
+        self.assertIn("still parked", res["msg"])
+        self.assertTrue(any("new agent tab" in n for n in res["notes"]))
+
+    def test_a_tab_that_never_came_up_stays_in_the_ledger(self):
+        self.confirm = False
+        self.entry(1)
+        res = park.unpark_one(self.WS, live_ids=set())
+        left = park.read_entry(park.ledger_path("ws-one"))
+        self.assertIsNotNone(left, "the entry was deleted")
+        self.assertEqual(len(left["sessions"]), 1)
+        self.assertTrue(any("no process appeared" in n for n in res["notes"]))
+
+    def test_a_prompt_with_something_typed_stops_the_resume(self):
+        park.prompt_line = lambda ws, s=None: "~/x ❯ git rebase --cont"
+        self.entry(1)
+        res = park.unpark_one(self.WS, live_ids=set())
+        self.assertFalse(res["ok"])
+        self.assertTrue(park.ledger_path("ws-one").exists())
+
+    def test_an_already_running_session_is_recognised_whatever_its_case(self):
+        e = self.entry(1)
+        sid = e["sessions"][0]["session_id"]
+        res = park.unpark_one(self.WS, live_ids={sid.upper().lower()})
+        self.assertIn("already running", res["msg"])
+        self.assertFalse(park.ledger_path("ws-one").exists())
+
+
 class TestRekeyMatch(unittest.TestCase):
     """A wrong re-key is silent and lands on a workspace the user is using."""
 
@@ -471,11 +559,18 @@ class TestBarePrompt(unittest.TestCase):
     """Guards `repaint` before it types into someone's shell."""
 
     def test_a_bare_prompt_is_safe_to_type_into(self):
-        for line in ("❯", "~/Sites/x on main ❯", "$", "davidvesely% ", "➜  "):
+        for line in ("❯", "~/Sites/x on main ❯", "$", "~/Sites/x % ",
+                     "davidvesely@mac ~ % ", "➜  "):
             self.assertTrue(park.bare_prompt(line), line)
 
     def test_a_prompt_with_something_typed_is_not(self):
         for line in ("❯ git status", "❯ park unpark .", "$ rm -rf /"):
+            self.assertFalse(park.bare_prompt(line), line)
+
+    def test_a_half_typed_command_ending_in_a_glyph_is_not(self):
+        # The naive "last character is a prompt glyph" test called all of these
+        # bare, and repaint would then append its prefill to the user's line.
+        for line in ("echo $", "grep # notes.md", "cat file >", "foo ➜  bar #"):
             self.assertFalse(park.bare_prompt(line), line)
 
     def test_an_unreadable_screen_is_not_bare(self):
@@ -679,6 +774,105 @@ class TestClearPrefill(unittest.TestCase):
         park.prompt_line = lambda ws, s=None: None
         self.assertFalse(park.clear_prefill("ws", [{"surface": "s1"}]))
         self.assertEqual(self.sent, [])
+
+
+class TestPreparePrompt(unittest.TestCase):
+    """The check that stands between unpark and a line the user is typing."""
+
+    def setUp(self):
+        self.sent = []
+        self.real_do, self.real_line = park.cmux_do, park.prompt_line
+        park.cmux_do = lambda *a: self.sent.append(a) or True
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        park.cmux_do, park.prompt_line = self.real_do, self.real_line
+
+    def lines(self, *seq):
+        """Successive prompt_line answers — clearing changes what is there."""
+        it = iter(seq)
+        last = [None]
+
+        def read(ws, s=None):
+            try:
+                last[0] = next(it)
+            except StopIteration:
+                pass
+            return last[0]
+        park.prompt_line = read
+
+    def test_our_prefill_is_cleared_and_the_line_is_then_bare(self):
+        self.lines(f"~/x ❯ {park.PREFILL}", "~/x ❯ ")
+        ok, why = park.prepare_prompt("ws", "s1")
+        self.assertTrue(ok, why)
+        self.assertIn("ctrl+u", self.sent[0])
+
+    def test_a_bare_prompt_needs_no_clearing(self):
+        self.lines("~/x ❯ ")
+        self.assertEqual(park.prepare_prompt("ws"), (True, None))
+        self.assertEqual(self.sent, [])
+
+    def test_a_half_typed_command_is_refused(self):
+        # The prefill is gone (a cmux restart wipes the buffer) and the user
+        # started typing. The old check only looked for the prefill, said
+        # "nothing of mine here" and appended the resume command + enter.
+        self.lines("~/x ❯ git status")
+        ok, why = park.prepare_prompt("ws")
+        self.assertFalse(ok)
+        self.assertIn("typed at the prompt", why)
+        self.assertEqual(self.sent, [])
+
+    def test_text_typed_after_our_prefill_survives_the_clear(self):
+        # ctrl+u wipes the whole line, so what is left after clearing has to be
+        # looked at again rather than assumed empty.
+        self.lines(f"~/x ❯ {park.PREFILL}", "~/x ❯ rm -rf")
+        ok, why = park.prepare_prompt("ws")
+        self.assertFalse(ok)
+        self.assertIn("typed at the prompt", why)
+
+    def test_an_unreadable_prompt_is_refused(self):
+        self.lines(None)
+        ok, why = park.prepare_prompt("ws")
+        self.assertFalse(ok)
+        self.assertIn("cannot read", why)
+
+    def test_a_failed_clear_is_refused(self):
+        park.cmux_do = lambda *a: False
+        self.lines(f"~/x ❯ {park.PREFILL}")
+        ok, why = park.prepare_prompt("ws")
+        self.assertFalse(ok)
+        self.assertIn("would not clear", why)
+
+
+class TestWaitForSessions(unittest.TestCase):
+    """`cmux send` succeeding is not a session starting."""
+
+    def test_a_live_session_is_confirmed(self):
+        real = park.ps_table
+        sid = "11111111-2222-3333-4444-555555555555"
+        park.ps_table = lambda: {7: {"ppid": 1, "rss": 0, "start": 0,
+                                     "cmd": f"claude --resume {sid}"}}
+        self.addCleanup(lambda: setattr(park, "ps_table", real))
+        self.assertEqual(park.wait_for_sessions([sid], timeout=0.1), {sid})
+
+    def test_a_session_that_never_starts_is_not(self):
+        real = park.ps_table
+        park.ps_table = lambda: {}
+        self.addCleanup(lambda: setattr(park, "ps_table", real))
+        started = time.time()
+        self.assertEqual(
+            park.wait_for_sessions(["11111111-2222-3333-4444-555555555555"],
+                                   timeout=0.3, step=0.1), set())
+        self.assertLess(time.time() - started, 2.0)
+
+    def test_case_does_not_hide_a_running_session(self):
+        real = park.ps_table
+        sid = "AAAAAAAA-2222-3333-4444-555555555555"
+        park.ps_table = lambda: {7: {"ppid": 1, "rss": 0, "start": 0,
+                                     "cmd": f"claude --resume {sid}"}}
+        self.addCleanup(lambda: setattr(park, "ps_table", real))
+        self.assertEqual(park.wait_for_sessions([sid.lower()], timeout=0.1),
+                         {sid.lower()})
 
 
 class TestFormatting(unittest.TestCase):
