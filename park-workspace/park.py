@@ -88,12 +88,24 @@ TEST_BROWSER_RE = re.compile(
     r"Chrome for Testing|chromiumdev_profile|chrome-for-testing"
 )
 # A dev server is often launched through one of these, so the name we want is
-# the first token that is not the interpreter or one of its flags.
-LAUNCHERS = {"node", "npx", "bun", "deno", "python", "python3", "-m", "exec"}
+# the first token that is not the interpreter or one of its flags. The second
+# group are wrappers that run something else without changing what it IS; not
+# reading through them let `env git commit -m npm run dev broke` (as ps renders
+# argv, unquoted) stop at `env`, miss NEVER_KILL, and then match `npm run dev`
+# in the COMMIT MESSAGE — classifying a git commit as a dev server and killing
+# its editor.
+LAUNCHERS = {"node", "npx", "bun", "deno", "python", "python3", "-m", "exec",
+             "env", "nice", "nohup", "sudo", "doas", "time", "command",
+             "stdbuf", "setsid"}
 # Launcher flags that swallow the next token, so `npx --package vite prettier`
 # is prettier and not vite. `-m` belongs in LAUNCHERS, not here: `python -m
-# uvicorn app` must read THROUGH it to uvicorn, not skip past it.
-VALUE_FLAGS = {"--package", "-p", "--loader", "--require", "-r", "-c"}
+# uvicorn app` must read THROUGH it to uvicorn, not skip past it. `-n`/`-u` are
+# here for `nice -n 10` and `sudo -u someone`, whose values would otherwise
+# read as the program being run.
+VALUE_FLAGS = {"--package", "-p", "--loader", "--require", "-r", "-c",
+               "-n", "-u"}
+# `env FOO=1 git …`: an assignment is neither a flag nor the program.
+ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Never classify these as anything killable, whatever else the line contains.
 # `git commit -m "npm run dev broke"` and `vim vite.config.ts` are the user's
 # work; a phrase appearing as an ARGUMENT must never cost them a buffer.
@@ -308,19 +320,38 @@ def closed_workspaces(base=None):
     return out
 
 
+def etime_seconds(s):
+    """`ps` etime ([[dd-]hh:]mm:ss) as seconds, or None if it will not parse."""
+    m = re.match(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$", s.strip())
+    if not m:
+        return None
+    d, h, mi, sec = (int(x) if x else 0 for x in m.groups())
+    return d * 86400 + h * 3600 + mi * 60 + sec
+
+
 def ps_table():
-    """One ps sweep: pid -> {cmd, ppid, rss}."""
-    r = subprocess.run(["ps", "-Ao", "pid=,ppid=,rss=,command="],
+    """One ps sweep: pid -> {cmd, ppid, rss, start}.
+
+    `start` is what makes a pid identifiable: a pid alone is recycled, and a
+    command line alone repeats across workspaces (cmux 0.64 starts every agent
+    as the same `claude --dangerously-skip-permissions --resume`). Only the two
+    together say "still the process we measured" — see `pid_matches`, which
+    stands between a stale snapshot and SIGKILLing an unrelated tree.
+    """
+    r = subprocess.run(["ps", "-Ao", "pid=,ppid=,rss=,etime=,command="],
                        capture_output=True, text=True)
+    now = time.time()
     table = {}
     for line in r.stdout.splitlines():
-        parts = line.split(None, 3)
-        if len(parts) < 4:
+        parts = line.split(None, 4)
+        if len(parts) < 5:
             continue
         try:
+            secs = etime_seconds(parts[3])
             table[int(parts[0])] = {"ppid": int(parts[1]),
                                     "rss": int(parts[2]) * 1024,
-                                    "cmd": parts[3]}
+                                    "start": None if secs is None else now - secs,
+                                    "cmd": parts[4]}
         except ValueError:
             pass
     return table
@@ -358,15 +389,21 @@ def read_env(pids):
 
 
 def attribute(spaces):
-    """Map each workspace to the processes it owns.
+    """Map each workspace UUID to the processes it owns.
 
     Primary key is the inherited CMUX_WORKSPACE_ID (exact). Processes that lost
     it — daemonised helpers such as agent-browser, which reparent to init —
     fall back to longest-prefix cwd matching, so a workspace rooted at /repo
     cannot swallow a nested worktree workspace at /repo/.claude/worktrees/x.
+
+    Keyed by UUID and not by `ref`, because a ref is POSITIONAL: `workspace:12`
+    is whatever sits twelfth right now. Targets are resolved in one scan and
+    attributed in another, so a workspace closing in between shifts every ref
+    after it — and this map is what decides which processes get SIGKILLed. A
+    uuid cannot slide onto a different workspace.
     """
     table = ps_table()
-    by_id = {w["id"]: w["ref"] for w in spaces}
+    known = {w["id"] for w in spaces}
 
     interesting = {
         pid: info for pid, info in table.items()
@@ -375,7 +412,7 @@ def attribute(spaces):
     envs = read_env(interesting.keys())
 
     dirs = sorted(
-        ((w.get("current_directory") or "").rstrip("/"), w["ref"])
+        ((w.get("current_directory") or "").rstrip("/"), w["id"])
         for w in spaces if w.get("current_directory")
     )
     dirs.sort(key=lambda t: -len(t[0]))
@@ -383,11 +420,12 @@ def attribute(spaces):
     by_ws, unmapped = {}, []
     for pid, info in interesting.items():
         env = envs.get(pid, {})
-        ref = by_id.get(env.get("workspace") or "")
+        ws_id = env.get("workspace") or ""
         entry = {"pid": pid, "cmd": info["cmd"], "rss": info["rss"],
+                 "start": info.get("start"),
                  "surface": env.get("surface") or "", "cwd": None}
-        if ref:
-            by_ws.setdefault(ref, []).append(entry)
+        if ws_id in known:
+            by_ws.setdefault(ws_id, []).append(entry)
         else:
             unmapped.append((pid, entry))
 
@@ -396,9 +434,9 @@ def attribute(spaces):
         if not cwd:
             continue
         entry["cwd"] = cwd
-        for d, ref in dirs:
+        for d, ws_id in dirs:
             if d and (cwd == d or cwd.startswith(d + "/")):
-                by_ws.setdefault(ref, []).append(entry)
+                by_ws.setdefault(ws_id, []).append(entry)
                 break
     return by_ws
 
@@ -419,12 +457,8 @@ def proc_start_epoch(pid):
     """Process start time, derived from ps etime ([[dd-]hh:]mm:ss)."""
     r = subprocess.run(["ps", "-p", str(pid), "-o", "etime="],
                        capture_output=True, text=True)
-    s = r.stdout.strip()
-    m = re.match(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$", s)
-    if not m:
-        return None
-    d, h, mi, sec = (int(x) if x else 0 for x in m.groups())
-    return time.time() - (d * 86400 + h * 3600 + mi * 60 + sec)
+    secs = etime_seconds(r.stdout)
+    return None if secs is None else time.time() - secs
 
 
 def project_dir(cwd):
@@ -652,7 +686,8 @@ def cpu_sample(pids, seconds=2.0, snaps=None):
 def runs_binary(cmd, names):
     """Is one of `names` the program this command line actually runs?
 
-    Checks the command token and, when that is an interpreter, whatever it goes
+    Checks the command token and, when that is an interpreter or a wrapper,
+    whatever it goes
     on to run — so `node .bin/vite` and `node .../nuxi/bin/nuxi.mjs` count while
     `rg webpack src/` and `vim vite.config.ts` do not. Compares basenames, so a
     match must be the last path component rather than any directory along the
@@ -663,6 +698,8 @@ def runs_binary(cmd, names):
     for tok in cmd.split():
         if skip_next:
             skip_next = False
+            continue
+        if ENV_ASSIGNMENT_RE.match(tok):
             continue
         if tok.startswith("-") and tok not in LAUNCHERS:
             skip_next = tok in VALUE_FLAGS
@@ -738,6 +775,21 @@ def classify(procs, table=None):
     return claude, dev, browser
 
 
+def tree_pids(procs, table):
+    """Every pid `kill_tree` would reach from these roots, the roots included."""
+    kids = {}
+    for pid, info in table.items():
+        kids.setdefault(info["ppid"], []).append(pid)
+    seen, stack = set(), [x["pid"] for x in procs]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        stack.extend(kids.get(cur, []))
+    return seen
+
+
 def tree_rss(procs, table):
     """RSS of everything `kill_tree` would actually take, deduplicated.
 
@@ -749,17 +801,7 @@ def tree_rss(procs, table):
     (RSS double-counts pages shared between processes, so the true figure sits
     somewhere below this — but this is the set of processes that go.)
     """
-    kids = {}
-    for pid, info in table.items():
-        kids.setdefault(info["ppid"], []).append(pid)
-    seen, stack = set(), [x["pid"] for x in procs]
-    while stack:
-        cur = stack.pop()
-        if cur in seen:
-            continue
-        seen.add(cur)
-        stack.extend(kids.get(cur, []))
-    return sum(table[c]["rss"] for c in seen if c in table)
+    return sum(table[c]["rss"] for c in tree_pids(procs, table) if c in table)
 
 
 def self_pids(table=None):
@@ -1141,7 +1183,7 @@ def collect(spaces=None):
     # lookups: status is a ~256 ms cmux round-trip and git is a subprocess.
     keep = []
     for w in spaces:
-        procs = by_ws.get(w["ref"], [])
+        procs = by_ws.get(w["id"], [])
         claude, dev, browser = classify(procs, table) if procs else ([], [], [])
         # Normalised to {} so the ledger-or-live fallbacks below can just be
         # `entry.get(x) or w.get(y)`. read_entry never yields an empty dict, so
@@ -1298,10 +1340,24 @@ def pid_matches(p):
     Re-reads ps for the single pid rather than trusting the batch snapshot.
     Without this, kill_tree can SIGTERM an unrelated process and its whole
     descendant tree after macOS reuses a pid.
+
+    The command line alone does not settle it: cmux 0.64 starts every agent as
+    the same `claude --dangerously-skip-permissions --resume`, so a recycled pid
+    running a DIFFERENT workspace's session compares equal. The start time is
+    what tells them apart. Both readings come from `ps` etime, which is whole
+    seconds, so they can disagree by a second at each end.
     """
-    r = subprocess.run(["ps", "-o", "command=", "-p", str(p["pid"])],
+    r = subprocess.run(["ps", "-o", "etime=,command=", "-p", str(p["pid"])],
                        capture_output=True, text=True, check=False)
-    return r.returncode == 0 and r.stdout.strip() == p["cmd"].strip()
+    if r.returncode != 0:
+        return False
+    parts = r.stdout.strip().split(None, 1)
+    if len(parts) < 2 or parts[1].strip() != p["cmd"].strip():
+        return False
+    was, secs = p.get("start"), etime_seconds(parts[0])
+    if was is None or secs is None:
+        return True
+    return abs((time.time() - secs) - was) <= 3.0
 
 
 def seconds_since(iso):
@@ -1419,6 +1475,24 @@ def live_session_ids(table=None):
     return ids
 
 
+def draft_guard(ws_id, claude):
+    """Why these tabs must not be killed right now, or None. Reads the screen.
+
+    A draft exists ONLY in the agent's input box — no transcript, no process
+    state, nothing on disk — so killing the session is the one operation that
+    destroys it silently. Run twice per park: once before the expensive checks
+    and once immediately before the kill, because the seconds in between are
+    exactly when a user who is looking at the workspace types into it.
+    """
+    for c in claude:
+        draft = unsent_input(ws_id, c.get("surface"))
+        if draft is None:
+            return "cannot read the prompt to check for unsent text"
+        if draft:
+            return f"unsent text in the prompt: {draft[:40]!r}"
+    return None
+
+
 def busy_verdict(state, sessions):
     """Decide whether a turn is really in flight. -> (pill_was_stale, refusal)
 
@@ -1468,7 +1542,7 @@ def park_one(w, by_ws, table, dry=False, force=False, brutal=False,
     if ledger_path(w["id"]).exists():
         res["msg"] = "already parked"
         return res
-    procs = by_ws.get(ref, [])
+    procs = by_ws.get(w["id"], [])
     claude, dev, browser = classify(procs, table)
     if not claude:
         res["msg"] = "no claude session"
@@ -1487,21 +1561,21 @@ def park_one(w, by_ws, table, dry=False, force=False, brutal=False,
                       "park it from a new tab")
         return res
 
-    # A draft exists ONLY in the agent's input box — no transcript, no process
-    # state, nothing on disk — so killing the session is the one operation that
-    # destroys it silently. Checked before anything expensive, and per tab.
+    # Checked before anything expensive, and per tab. Repeated below, right
+    # before the kill.
     if not brutal:
-        for c in claude:
-            draft = unsent_input(w["id"], c.get("surface"))
-            if draft is None:
-                res["msg"] = "cannot read the prompt to check for unsent text"
-                return res
-            if draft:
-                res["msg"] = f"unsent text in the prompt: {draft[:40]!r}"
-                return res
+        why = draft_guard(w["id"], claude)
+        if why:
+            res["msg"] = why
+            return res
 
     state = workspace_status(w["id"]).get("claude_code", "")
-    if (cpu_sample([p["pid"] for p in claude], snaps=snaps) > 15.0
+    # The whole tree, not the roots. A turn that shells out to a compiler or a
+    # test run leaves the root claude near 0% while the machine is flat out, so
+    # sampling roots alone reported "idle" for the busiest workspaces there are
+    # — and with no status pill (about a third of them) and a tool call that
+    # writes nothing for 20 s, this is the only gate left standing.
+    if (cpu_sample(tree_pids(claude, table), snaps=snaps) > 15.0
             and not (force or brutal)):
         res["msg"] = "busy (cpu)"
         return res
@@ -1569,6 +1643,14 @@ def park_one(w, by_ws, table, dry=False, force=False, brutal=False,
         # re-refused the stale-pill workspace this just cleared.
         again = workspace_status(w["id"]).get("claude_code", "")
         _, why = busy_verdict(again, sessions)
+        if why:
+            res["msg"] = f"became busy — {why}"
+            return res
+        # Seconds have passed since the first draft check — a CPU window, a
+        # status round-trip and a session lookup per tab. Typing into a
+        # workspace while looking at it takes less than that, and the draft is
+        # the one thing here with no copy anywhere.
+        why = draft_guard(w["id"], claude)
         if why:
             res["msg"] = f"became busy — {why}"
             return res
@@ -2197,7 +2279,7 @@ def cmd_rekey(argv):
         if orphans:
             by_ws, table = attribute(spaces), ps_table()
             for w in spaces:
-                if classify(by_ws.get(w["ref"], []), table)[0]:
+                if classify(by_ws.get(w["id"], []), table)[0]:
                     unavailable.add(w["id"])
 
     if not orphans:

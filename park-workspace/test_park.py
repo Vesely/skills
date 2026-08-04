@@ -62,6 +62,22 @@ class TestWhoGetsKilled(unittest.TestCase):
         self.assertEqual(park.kill_kind("node /x/.bin/agent-browser"),
                          "test-browser")
 
+    def test_wrappers_are_read_through_to_the_real_program(self):
+        # `ps` renders argv unquoted, so a commit message is just more tokens.
+        # Stopping at the wrapper missed NEVER_KILL and then matched `npm run
+        # dev` INSIDE the message — a git commit classified as a dev server,
+        # killed with the editor holding the message.
+        for cmd in ("env git commit -m npm run dev broke",
+                    "env FOO=1 git commit -m npm run dev broke",
+                    "nice -n 10 vim vite.config.ts npm run dev",
+                    "sudo git rebase -i npm run dev",
+                    "nohup git commit -m npm run dev"):
+            self.assertIsNone(park.kill_kind(cmd), cmd)
+
+    def test_a_wrapped_dev_server_is_still_a_dev_server(self):
+        for cmd in ("env vite", "stdbuf -oL npm run dev", "nohup next dev"):
+            self.assertEqual(park.kill_kind(cmd), "dev-server", cmd)
+
     def test_is_claude_matches_the_program_not_the_path(self):
         self.assertTrue(park.is_claude("claude --resume abc"))
         self.assertTrue(park.is_claude("/opt/homebrew/bin/claude"))
@@ -523,6 +539,54 @@ class TestProcessLiveness(unittest.TestCase):
         self.assertEqual([x["pid"] for x in left], [p.pid])
 
 
+class TestProcessIdentity(unittest.TestCase):
+    """What stops park from SIGKILLing a tree it never measured."""
+
+    def spawn(self):
+        p = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"])
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        return p
+
+    def test_etime_parses_every_shape_ps_emits(self):
+        self.assertEqual(park.etime_seconds("12:34"), 754)
+        self.assertEqual(park.etime_seconds("01:02:03"), 3723)
+        self.assertEqual(park.etime_seconds("2-03:04:05"), 183845)
+        self.assertIsNone(park.etime_seconds("what"))
+
+    def test_ps_table_carries_a_start_time(self):
+        p = self.spawn()
+        row = park.ps_table()[p.pid]
+        self.assertIsNotNone(row["start"])
+        self.assertLess(abs(row["start"] - time.time()), 30)
+
+    def test_the_same_process_matches(self):
+        p = self.spawn()
+        row = park.ps_table()[p.pid]
+        self.assertTrue(park.pid_matches(
+            {"pid": p.pid, "cmd": row["cmd"], "start": row["start"]}))
+
+    def test_a_recycled_pid_running_the_same_command_does_not(self):
+        # cmux 0.64 starts every agent as the same command line, so the
+        # command alone cannot tell two sessions apart — only the start time.
+        p = self.spawn()
+        row = park.ps_table()[p.pid]
+        self.assertFalse(park.pid_matches(
+            {"pid": p.pid, "cmd": row["cmd"], "start": row["start"] - 600}))
+
+    def test_a_snapshot_without_a_start_time_still_matches_on_command(self):
+        p = self.spawn()
+        row = park.ps_table()[p.pid]
+        self.assertTrue(park.pid_matches({"pid": p.pid, "cmd": row["cmd"]}))
+
+    def test_tree_pids_reaches_the_descendants_the_kill_would(self):
+        table = {10: {"ppid": 1, "rss": 0, "cmd": "claude"},
+                 11: {"ppid": 10, "rss": 0, "cmd": "node mcp"},
+                 12: {"ppid": 11, "rss": 0, "cmd": "npm test"},
+                 20: {"ppid": 1, "rss": 0, "cmd": "unrelated"}}
+        self.assertEqual(park.tree_pids([proc(10, "claude")], table),
+                         {10, 11, 12})
+
+
 class TestSelfPids(unittest.TestCase):
     def test_our_own_ancestry_is_in_the_chain(self):
         chain = park.self_pids()
@@ -561,6 +625,24 @@ class TestPromptGuards(unittest.TestCase):
         park.read_screen = lambda ws, surface=None: None
         self.addCleanup(self.restore)
         self.assertIsNone(park.unsent_input("ws"))
+
+    def test_draft_guard_refuses_a_draft_in_any_tab(self):
+        park.read_screen = self.screen([self.BOX, "> wait"])
+        self.addCleanup(self.restore)
+        why = park.draft_guard("ws", [proc(1, "claude", surface="s1"),
+                                      proc(2, "claude", surface="s2")])
+        self.assertIn("unsent text", why)
+
+    def test_draft_guard_refuses_a_screen_it_cannot_read(self):
+        park.read_screen = lambda ws, surface=None: None
+        self.addCleanup(self.restore)
+        self.assertIn("cannot read",
+                      park.draft_guard("ws", [proc(1, "claude")]))
+
+    def test_draft_guard_passes_a_clean_prompt(self):
+        park.read_screen = self.screen(["~/Sites/foo ❯ "])
+        self.addCleanup(self.restore)
+        self.assertIsNone(park.draft_guard("ws", [proc(1, "claude")]))
 
     def restore(self):
         import importlib
