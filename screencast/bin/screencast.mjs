@@ -8,11 +8,13 @@
 //   screencast chapter "<title>"      Mark a chapter at the current moment
 //   screencast stop                   Stop recording and render <name>.mp4
 //   screencast render [name]          Re-render from an existing recording
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG, run, log } from "../lib/util.mjs";
 import * as ab from "../lib/agentbrowser.mjs";
 import * as state from "../lib/state.mjs";
+import { splitPrivateArgs, effectDur } from "../lib/args.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SKILL_ROOT = path.resolve(__dirname, "..");
@@ -56,9 +58,14 @@ function doStart(args) {
   const p = state.paths(name);
   require_mkdir(p.dir);
 
-  ab.setViewport(CONFIG.viewport.w, CONFIG.viewport.h, CONFIG.captureScale);
+  // A silently failed viewport leaves the capture at some other geometry while
+  // the timeline still assumes CONFIG.viewport, which misplaces every zoom.
+  const vp = ab.setViewport(CONFIG.viewport.w, CONFIG.viewport.h, CONFIG.captureScale);
+  if (vp.code !== 0) {
+    return fail("agent-browser set viewport failed:\n" + (vp.error?.message || vp.stderr));
+  }
   const rec = ab.recordStart(p.video, url);
-  if (rec.code !== 0) return fail("agent-browser record start failed:\n" + rec.stderr);
+  if (rec.code !== 0) return fail("agent-browser record start failed:\n" + (rec.error?.message || rec.stderr));
   const startWall = Date.now();
   const flashWall = ab.injectFlash(CONFIG.flashColor);
 
@@ -87,31 +94,54 @@ function doChapter(args) {
   log(`chapter: ${title}`);
 }
 
+const SECRET_MASK = "••••••••";
+
+// Typed text is written to events.jsonl and burned into the keycast overlay, so
+// a secret typed during a recording ends up in the shipped MP4. Redact when the
+// caller says so, or when the field itself declares it is a password.
+//
+// A lookup that cannot be answered (agent-browser gone, stale ref, malformed
+// output) must not read as "not a password" — that is exactly the case where a
+// secret would leak. Fail closed and say so, rather than guessing.
+function isSecretInput(cmd, target, priv) {
+  if (priv) return true;
+  if (!target || !["type", "fill"].includes(cmd)) return false;
+  const attr = ab.getAttr(target, "type");
+  if (!attr.ok) {
+    log(`could not read the type of ${target} — redacting this value; pass --private to silence this`);
+    return true;
+  }
+  return (attr.value || "").toLowerCase() === "password";
+}
+
 function doPassthrough(cmd, args) {
   const active = state.getActive();
   const loggable = active && LOGGABLE.has(cmd);
 
+  const { priv, passArgs, logArgs } = splitPrivateArgs(cmd, args);
+
   // Resolve the target box BEFORE the action (the element may change after).
   let box = null;
-  if (loggable && args[0] && !["press", "keyboard"].includes(cmd)) {
-    box = ab.getBox(args[0]);
+  if (loggable && logArgs[0] && !["press", "keyboard"].includes(cmd)) {
+    box = ab.getBox(logArgs[0]);
   }
+  const secret = loggable && isSecretInput(cmd, logArgs[0], priv);
 
   const t = Date.now(); // stamp at dispatch, so the effect lines up with the click
-  const code = ab.passthrough([cmd, ...args]);
+  const code = ab.passthrough([cmd, ...passArgs]);
   if (!loggable || code !== 0) return process.exit(code);
 
   let ev = null;
   if (cmd === "click" || cmd === "dblclick" || cmd === "check" || cmd === "uncheck" || cmd === "select") {
-    ev = { t, type: "click", target: args[0] };
+    ev = { t, type: "click", target: logArgs[0] };
   } else if (cmd === "hover") {
-    ev = { t, type: "move", target: args[0] };
+    ev = { t, type: "move", target: logArgs[0] };
   } else if (cmd === "type" || cmd === "fill") {
-    ev = { t, type: "keys", text: args.slice(1).join(" "), target: args[0] };
+    ev = { t, type: "keys", text: secret ? SECRET_MASK : logArgs.slice(1).join(" "), target: logArgs[0], redacted: secret || undefined };
   } else if (cmd === "press") {
-    ev = { t, type: "key", key: args[0] };
+    ev = { t, type: "key", key: logArgs[0] };
   } else if (cmd === "keyboard") {
-    ev = { t, type: "keys", text: args.slice(1).join(" ") };
+    ev = { t, type: "keys", text: secret ? SECRET_MASK : logArgs.slice(1).join(" "), redacted: secret || undefined };
   }
   if (ev && box) ev.box = box;
   if (ev) state.appendEvent(active, ev);
@@ -134,6 +164,15 @@ function parseArgs(args) {
   return { pos, flags };
 }
 
+// The event is only committed once the hold actually happened: an effect logged
+// at full duration that never held leaves the timeline pointing at a moment the
+// recording does not contain.
+function holdFor(active, ev, label) {
+  const r = ab.passthrough(["wait", String(Math.round(ev.dur * 1000))]);
+  if (r !== 0) return fail(`could not hold the page for ${ev.dur}s — ${label} not recorded`);
+  state.appendEvent(active, ev);
+}
+
 function doHighlight(args) {
   const active = state.getActive();
   if (!active) return fail("no active recording");
@@ -142,11 +181,11 @@ function doHighlight(args) {
   if (!sel) return fail("highlight needs a selector: screencast highlight @e5 [dur] [--mode spotlight|ring] [--no-zoom]");
   const box = ab.getBox(sel);
   if (!box) return fail(`could not resolve element box for ${sel}`);
-  const dur = Number(pos[1]) || 2.5;
+  const dur = effectDur(pos[1], 2.5);
+  if (dur === null) return fail(`highlight duration must be a positive number of seconds, got ${pos[1]}`);
   const ev = { t: Date.now(), type: "highlight", box, dur, mode: flags.mode === "ring" ? "ring" : "spotlight" };
   if (flags["no-zoom"]) ev.zoom = false;
-  state.appendEvent(active, ev);
-  ab.passthrough(["wait", String(Math.round(dur * 1000))]); // hold the element on screen
+  holdFor(active, ev, "highlight");
   log(`highlight ${sel} (${ev.mode}, ${dur}s)`);
 }
 
@@ -154,29 +193,44 @@ function doNote(args) {
   const active = state.getActive();
   if (!active) return fail("no active recording");
   const { pos, flags } = parseArgs(args);
-  const text = pos[0];
+  const text = (pos[0] || "").trim();
   if (!text) return fail('note needs text: screencast note "Click here" @e5 [dur] [--side auto] [--zoom]');
   const ev = { t: Date.now(), type: "note", text, dur: 3, side: flags.side || "auto" };
   // remaining positionals: a selector and/or a duration
   for (const x of pos.slice(1)) {
-    if (!isNaN(Number(x))) ev.dur = Number(x);
-    else ev.box = ab.getBox(x);
+    if (!isNaN(Number(x))) {
+      const d = effectDur(x, 3);
+      if (d === null) return fail(`note duration must be a positive number of seconds, got ${x}`);
+      ev.dur = d;
+    } else ev.box = ab.getBox(x);
   }
   if (flags.at) {
-    const [x, y] = String(flags.at).split(",").map(Number);
-    if (!isNaN(x) && !isNaN(y)) ev.at = { x, y };
+    // "x,y" exactly: `,0` parses to 0,0 via Number("") and would silently anchor
+    // the callout in the corner instead of telling the caller it was malformed.
+    const parts = String(flags.at).split(",");
+    const [x, y] = parts.map((v) => (v.trim() === "" ? NaN : Number(v)));
+    if (parts.length !== 2 || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return fail(`--at needs "x,y" in viewport pixels, got ${JSON.stringify(String(flags.at))}`);
+    }
+    ev.at = { x, y };
   }
   if (flags.zoom) ev.zoom = true;
   if (!ev.box && !ev.at) return fail("note needs a target: a selector or --at x,y");
-  state.appendEvent(active, ev);
-  ab.passthrough(["wait", String(Math.round(ev.dur * 1000))]);
+  holdFor(active, ev, "note");
   log(`note "${text.slice(0, 40)}" (${ev.dur}s)`);
 }
 
 async function doStop() {
   const active = state.getActive();
   if (!active) return fail("no active recording to stop");
-  ab.recordStop();
+  const stopped = ab.recordStop();
+  if (stopped.code !== 0) {
+    return fail("agent-browser record stop failed:\n" + (stopped.error?.message || stopped.stderr));
+  }
+  // The take is over the moment the recorder stops: retire the active pointer
+  // before rendering, so a render failure cannot leave later commands appending
+  // events to a finished recording.
+  state.clearActive();
   log(`stopped "${active}", rendering…`);
   await ensureDeps();
   const { render } = await import("../lib/render.mjs");
@@ -185,7 +239,7 @@ async function doStop() {
 }
 
 async function doRender(args) {
-  const name = args[0] || state.getActive();
+  const name = args[0] || state.getActive() || state.getLast();
   if (!name) return fail("render needs a <name>");
   await ensureDeps();
   const { render } = await import("../lib/render.mjs");
@@ -199,7 +253,7 @@ function fail(msg) {
   process.exit(1);
 }
 function require_mkdir(dir) {
-  run("mkdir", ["-p", dir]);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); // may hold typed text
 }
 
 // main ---------------------------------------------------------------------

@@ -10,13 +10,37 @@ import { readState, paths } from "./state.mjs";
 import { buildTimeline } from "./timeline.mjs";
 import * as draw from "./draw.mjs";
 
+// A missing ffmpeg/ffprobe otherwise surfaces as "Unexpected end of JSON input",
+// which tells a first-time user nothing about what to install.
+function requireBin(bin) {
+  const r = run(bin, ["-version"]);
+  if (r.error?.code === "ENOENT") {
+    throw new Error(`${bin} not found on PATH — install ffmpeg (it provides both ffmpeg and ffprobe)`);
+  }
+  // A binary that is present but unusable (no execute permission, broken build)
+  // otherwise fails later with an error about the video instead of about itself.
+  if (r.error) throw new Error(`${bin} could not be run: ${r.error.message}`);
+  if (r.code !== 0) throw new Error(`${bin} is on PATH but failed to run:\n${r.stderr.slice(0, 400)}`);
+}
+
 function probe(video) {
+  requireBin("ffprobe");
   const r = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", video]);
-  const s = JSON.parse(r.stdout).streams[0];
+  if (r.code !== 0) throw new Error(`ffprobe failed on ${video}:\n${r.stderr}`);
+  let s;
+  try {
+    s = JSON.parse(r.stdout).streams?.[0];
+  } catch {
+    throw new Error(`ffprobe returned unreadable output for ${video}:\n${r.stdout.slice(0, 400)}`);
+  }
+  if (!s || typeof s.width !== "number" || typeof s.height !== "number") {
+    throw new Error(`ffprobe found no video stream in ${video} — the recording is probably empty`);
+  }
   return { videoW: s.width, videoH: s.height };
 }
 
 function extractFrames(video, dir, fps) {
+  requireBin("ffmpeg");
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   const r = run("ffmpeg", ["-y", "-i", video, "-vf", `fps=${fps}`, "-qscale:v", "2", path.join(dir, "%06d.jpg")]);
@@ -98,7 +122,17 @@ export async function render(name, cwd = process.cwd()) {
   const { state, events } = readState(name, cwd);
   const p = paths(name, cwd);
   const srcFps = state.fps || CONFIG.srcFps;
-  const outFps = Number(process.env.SCREENCAST_FPS) || CONFIG.fps;
+  // A bad SCREENCAST_FPS would reach ffmpeg and the frame-count maths; negative
+  // or absurd values there fail late and confusingly.
+  const outFps = (() => {
+    const raw = process.env.SCREENCAST_FPS;
+    if (raw === undefined || raw === "") return CONFIG.fps;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 1 || n > 240) {
+      throw new Error(`SCREENCAST_FPS must be a number between 1 and 240, got ${JSON.stringify(raw)}`);
+    }
+    return n;
+  })();
 
   if (!fs.existsSync(p.video)) throw new Error(`recording not found: ${p.video}`);
 
@@ -129,11 +163,30 @@ export async function render(name, cwd = process.cwd()) {
   // ffmpeg encoder fed raw RGBA on stdin.
   const enc = ["-y", "-f", "rawvideo", "-pixel_format", "rgba", "-video_size", `${OW}x${OH}`, "-framerate", String(outFps), "-i", "-"];
   if (hasChapters) enc.push("-i", p.chapters, "-map", "0:v", "-map_metadata", "1");
-  enc.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium", "-movflags", "+faststart", p.output);
+  // Encode beside the target and rename only once the result is validated:
+  // writing straight over p.output destroys the last good render if this one fails.
+  // Unique per process: two renders of one take must not fight over the same
+  // path, and a predictable name could be pre-planted as a symlink.
+  const tmpOut = `${p.output}.partial.${process.pid}.mp4`;
+  enc.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "medium", "-movflags", "+faststart", tmpOut);
   const ff = spawn("ffmpeg", enc, { stdio: ["pipe", "ignore", "pipe"] });
   let ffErr = "";
   ff.stderr.on("data", (d) => (ffErr += d));
-  const ffDone = new Promise((res, rej) => ff.on("close", (c) => (c === 0 ? res() : rej(new Error("ffmpeg encode failed:\n" + ffErr.slice(-2000))))));
+  let ffDead = null; // set once the encoder can no longer accept frames
+  const ffDone = new Promise((res, rej) => {
+    const die = (e) => {
+      ffDead = ffDead || e;
+      rej(e);
+    };
+    // Without an "error" listener a failed spawn throws unhandled, losing the
+    // real cause behind an EPIPE from the first frame write.
+    ff.on("error", (e) => die(new Error("ffmpeg could not start: " + e.message)));
+    // An ffmpeg that exits early turns every further write into EPIPE, which is
+    // unhandled on the stream rather than on the child.
+    ff.stdin.on("error", (e) => die(new Error("ffmpeg stopped reading frames: " + e.message)));
+    ff.on("close", (c) => (c === 0 ? res() : die(new Error("ffmpeg encode failed:\n" + ffErr.slice(-2000)))));
+  });
+  ffDone.catch(() => {}); // the writer below surfaces it; don't double-throw here
 
   const canvas = createCanvas(OW, OH);
   const ctx = canvas.getContext("2d");
@@ -257,13 +310,25 @@ export async function render(name, cwd = process.cwd()) {
       ctx.restore();
     }
 
+    if (ffDead) { fs.rmSync(tmpOut, { force: true }); throw ffDead; } // stop drawing into a pipe nobody reads
     const buf = Buffer.from(ctx.getImageData(0, 0, OW, OH).data.buffer);
-    if (!ff.stdin.write(buf)) await new Promise((res) => ff.stdin.once("drain", res));
+    if (!ff.stdin.write(buf)) {
+      // Race the drain against the encoder dying, or a crashed ffmpeg leaves
+      // this awaiting a "drain" that can never arrive.
+      await Promise.race([new Promise((res) => ff.stdin.once("drain", res)), ffDone.catch(() => {})]);
+      if (ffDead) throw ffDead;
+    }
     if (j % 60 === 0) log(`  frame ${j}/${totalFrames}`);
   }
 
   ff.stdin.end();
   await ffDone;
+  const outStat = fs.statSync(tmpOut, { throwIfNoEntry: false });
+  if (!outStat || outStat.size === 0) {
+    fs.rmSync(tmpOut, { force: true });
+    throw new Error(`ffmpeg reported success but produced no output at ${tmpOut}`);
+  }
+  fs.renameSync(tmpOut, p.output);
   if (!process.env.SCREENCAST_KEEP) fs.rmSync(p.srcFrames, { recursive: true, force: true });
   log(`done -> ${p.output}`);
   return p.output;
