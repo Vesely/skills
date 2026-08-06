@@ -481,6 +481,57 @@ class TestUnparkKeepsWhatItOwes(unittest.TestCase):
         self.assertFalse(park.ledger_path("ws-one").exists())
 
 
+class TestUnparkBatch(unittest.TestCase):
+    """Several unparks at once must not both claim one session."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.real = {k: getattr(park, k) for k in ("LEDGER", "unpark_one")}
+        park.LEDGER = Path(self.dir.name)
+        self.seen = []
+        park.unpark_one = lambda w, allow_exec=False, live_ids=None: (
+            self.seen.append(w["ref"])
+            or {"ref": w["ref"], "title": "", "ok": True, "notes": [],
+                "msg": "resumed"})
+        self.addCleanup(lambda: [setattr(park, k, v)
+                                 for k, v in self.real.items()])
+
+    def entry(self, ws_id, sid):
+        park.write_entry(park.ledger_path(ws_id),
+                         {"workspace_id": ws_id, "title": ws_id,
+                          "sessions": [{"session_id": sid}]})
+
+    def targets(self, *ids):
+        return [{"id": i, "ref": f"workspace:{n}", "title": i}
+                for n, i in enumerate(ids, 1)]
+
+    def test_every_target_gets_a_result_in_order(self):
+        self.entry("ws-a", "aaaaaaaa-1111-2222-3333-444444444444")
+        self.entry("ws-b", "bbbbbbbb-1111-2222-3333-444444444444")
+        res = park.unpark_batch(self.targets("ws-a", "ws-b"), set())
+        self.assertEqual([r["ref"] for r in res], ["workspace:1", "workspace:2"])
+        self.assertEqual(self.seen, ["workspace:1", "workspace:2"])
+
+    def test_two_entries_naming_one_session_only_dispatch_once(self):
+        # A bad re-key can leave two entries pointing at the same transcript.
+        # Serially the fold-as-you-go set caught it; in parallel nothing would.
+        sid = "aaaaaaaa-1111-2222-3333-444444444444"
+        self.entry("ws-a", sid)
+        self.entry("ws-b", sid)
+        res = park.unpark_batch(self.targets("ws-a", "ws-b"), set())
+        self.assertEqual(self.seen, ["workspace:1"])
+        self.assertFalse(res[1]["ok"])
+        self.assertIn("already being resumed", res[1]["msg"])
+
+    def test_a_session_already_running_is_never_dispatched(self):
+        sid = "aaaaaaaa-1111-2222-3333-444444444444"
+        self.entry("ws-a", sid)
+        res = park.unpark_batch(self.targets("ws-a", "ws-b"), {sid})
+        self.assertEqual(self.seen, ["workspace:2"])
+        self.assertFalse(res[0]["ok"])
+
+
 class TestRekeyMatch(unittest.TestCase):
     """A wrong re-key is silent and lands on a workspace the user is using."""
 
@@ -987,7 +1038,7 @@ class TestBulkSelection(unittest.TestCase):
     def rows(self, *rows):
         spaces = [{"id": r["ref"], "ref": r["ref"], "title": r["ref"]}
                   for r in rows]
-        park.all_workspaces = lambda: spaces
+        park.all_workspaces = lambda missing=None: spaces
         park.collect = lambda sp=None: rows
 
     def row(self, ref, hours=None, parked=False, busy=False, byts=1):
@@ -1024,6 +1075,17 @@ class TestBulkSelection(unittest.TestCase):
         self.assertEqual(park.bulk_targets(3600)[0], [])
         self.assertEqual([w["ref"] for w in park.bulk_targets(None)[0]],
                          ["workspace:1"])   # --all does not ask about time
+
+    def test_a_window_that_would_not_list_stops_the_park(self):
+        # Its workspaces are simply absent from the map, so attribute() places
+        # their processes by cwd — onto whichever workspace park CAN see.
+        def half(missing=None):
+            if missing is not None:
+                missing.append({"index": 3, "id": "WINDOW-UUID"})
+            return []
+        park.all_workspaces = half
+        with self.assertRaises(SystemExit):
+            park.workspaces_for_park()
 
     def test_parked_and_busy_rows_are_left_out(self):
         self.rows(self.row("workspace:1", hours=99, parked=True),

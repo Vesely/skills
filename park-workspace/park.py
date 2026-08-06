@@ -72,6 +72,9 @@ SNAPSHOT_MAX_AGE = 5.0
 # waiting — cmux round-trips, a CPU window, git — and they share one snapshot
 # per wave, so the wave size is also how fresh that snapshot stays.
 PARK_WAVE = 8
+# Unpark waves are smaller: each one ends by waiting for a claude to appear,
+# and a wave of resumes all booting at once is real load on the machine.
+UNPARK_WAVE = 6
 
 # A turn is in flight -> never park. Anything else is fair game.
 BUSY_STATES = {"running", "working", "thinking", "compacting"}
@@ -250,8 +253,18 @@ def list_windows():
     return wins
 
 
-def all_workspaces():
-    """Every workspace across every window. `workspace list` is per-window."""
+def all_workspaces(missing=None):
+    """Every workspace across every window. `workspace list` is per-window.
+
+    Pass `missing` a list to be told which windows would not enumerate. That
+    matters to anything about to KILL something: a window that dropped out is
+    not an empty window, it is a set of workspaces this map does not contain —
+    and `attribute` falls back to longest-prefix cwd matching for processes it
+    cannot place, so their claude sessions get handed to whichever *listed*
+    workspace sits above them in the tree. Parking that workspace then kills
+    them. Reading commands are happy with a partial answer and a warning;
+    `park` refuses to work from one.
+    """
     wins = list_windows()
 
     def fetch(win):
@@ -267,6 +280,8 @@ def all_workspaces():
     seen, out = set(), []
     for win, data in pmap(fetch, wins):
         if data is None:
+            if missing is not None:
+                missing.append(win)
             continue
         for ws in data.get("workspaces", []):
             if ws["id"] in seen:
@@ -1357,6 +1372,11 @@ def collect(spaces=None):
             "conflict": conflict,
             "bytes": (entry.get("freed_bytes", 0) if entry and not conflict
                       else tree_rss(procs, table)),
+            # What parking this workspace released, as recorded at the time.
+            # `bytes` is what it holds NOW, and for a conflicted row those are
+            # two different numbers with two different meanings — a --json
+            # consumer should not have to guess which one it got.
+            "freed_bytes": entry.get("freed_bytes", 0),
             "state": (state + " (stale)") if is_stale else (state or "-"),
             "busy": state.lower() in BUSY_STATES and not is_stale,
             "dev": len(dev), "browser": len(browser),
@@ -2364,7 +2384,7 @@ def cmd_park(argv):
 
     if spaces is None:
         with Spinner("looking at the workspaces…"):
-            spaces = all_workspaces()
+            spaces = workspaces_for_park()
 
     total, done, refused = 0, 0, 0
     # In waves, not one at a time. Everything a park does is I/O — cmux socket
@@ -2404,6 +2424,27 @@ def cmd_park(argv):
     return 1 if refused else 0
 
 
+def workspaces_for_park():
+    """The workspace map park is allowed to kill from — or a refusal.
+
+    A window that would not enumerate is not an empty window. Its workspaces
+    are absent from the map, so `attribute` cannot place their processes by
+    workspace id and falls back to longest-prefix cwd matching — which hands
+    them to whichever LISTED workspace sits above them in the tree. Park that
+    workspace and their sessions die with it, recorded under someone else's
+    ledger entry. Reading is fine with a partial answer; killing is not.
+    """
+    missing = []
+    spaces = all_workspaces(missing)
+    if missing:
+        die("cmux would not list "
+            + ", ".join(f"window {w['index']}" for w in missing)
+            + " — refusing to park from a partial map, because the processes "
+              "in it would be attributed to whichever workspace park CAN see. "
+              "Try again in a moment.")
+    return spaces
+
+
 def bulk_targets(idle):
     """Workspaces `--idle`/`--all` picks out. -> (targets, spaces)
 
@@ -2416,7 +2457,7 @@ def bulk_targets(idle):
     park_one's whole guard chain, so nothing here can park a busy session.
     """
     with Spinner("looking for idle workspaces…"):
-        spaces = all_workspaces()
+        spaces = workspaces_for_park()
         rows = collect(spaces)
     by_ref = {w["ref"]: w for w in spaces}
     picked = []
@@ -2469,9 +2510,16 @@ def cmd_unpark(argv):
         # one unpark may start a second process on.
         print(f"  warning: {len(unresolved)} running claude process(es) could "
               "not be identified; the already-running check cannot see them")
+
+    if len(targets) == 1:
+        # The single-target path is the one that can `exec`, and it is what
+        # `park unpark .` at a parked prompt runs.
+        results = [unpark_one(targets[0], allow_exec=True, live_ids=live_ids)]
+    else:
+        results = unpark_batch(targets, live_ids)
+
     resumed = 0
-    for w in targets:
-        r = unpark_one(w, allow_exec=len(targets) == 1, live_ids=live_ids)
+    for r in results:
         mark = "▶" if r["ok"] else "skip"
         print(f"  {mark:<5} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
         for n in r["notes"]:
@@ -2479,9 +2527,6 @@ def cmd_unpark(argv):
         # "not parked" is the state the caller asked for, so it is not a
         # failure — the same way an "already parked" park is not one.
         resumed += bool(r["ok"]) or r["msg"] == "not parked"
-        # A batch resumes sessions as it goes; without this the guard would
-        # still be answering from the snapshot taken before any of them existed.
-        live_ids |= {str(i).lower() for i in r.get("resumed_ids", ())}
         if r.get("exec"):
             # Handing this terminal over ends the batch by definition, so
             # everything above has already been printed.
@@ -2490,6 +2535,47 @@ def cmd_unpark(argv):
             os.execvp("/bin/sh", ["/bin/sh", "-c", r["exec"]])
     print()
     return 0 if resumed == len(targets) else 1
+
+
+def unpark_batch(targets, live_ids):
+    """Resume several workspaces at once. Results come back in target order.
+
+    Each workspace holds its own operation lock for its whole transaction, so
+    the only thing left to coordinate is the one collision a per-workspace lock
+    cannot see: two ledger entries naming the SAME session. That should not
+    happen, but a re-key onto the wrong workspace or a hand-edited ledger makes
+    it happen, and the cost is the thing this tool exists to prevent — two
+    processes appending to one transcript.
+
+    So the claim is made here, in the parent, in target order, before anything
+    is dispatched. A worker never has to ask "did someone else just take this",
+    which is what made the serial loop's fold-as-you-go set necessary in the
+    first place.
+    """
+    claimed, dispatch, refused = set(live_ids), [], {}
+    for w in targets:
+        e = read_entry(ledger_path(w["id"]))
+        ids = {str(s.get("session_id") or "").lower()
+               for s in (e or {}).get("sessions", [])}
+        clash = ids & claimed
+        if clash:
+            refused[w["id"]] = {
+                "ref": w["ref"], "notes": [], "ok": False,
+                "title": (e or {}).get("title") or w.get("title") or "",
+                "msg": f"session {sorted(clash)[0][:8]} is already being "
+                       "resumed by another target in this batch"}
+            continue
+        claimed |= ids
+        dispatch.append(w)
+
+    out = {}
+    for i in range(0, len(dispatch), UNPARK_WAVE):
+        wave = dispatch[i:i + UNPARK_WAVE]
+        with Spinner(f"resuming {len(wave)} workspace(s)…"):
+            done = pmap(lambda w: unpark_one(w, live_ids=live_ids), wave,
+                        workers=UNPARK_WAVE)
+        out.update({w["id"]: r for w, r in zip(wave, done)})
+    return [refused.get(w["id"]) or out[w["id"]] for w in targets]
 
 
 def cmd_show(argv):
@@ -3278,7 +3364,9 @@ def _picker(stdscr, rows, ws_by_ref, reload):
 
 def cmd_pick(argv):
     with Spinner("scanning workspaces…"):
-        spaces = all_workspaces()
+        # Enter kills things here too, so the picker holds itself to the same
+        # rule as `park park`: no parking from a map with a window missing.
+        spaces = workspaces_for_park()
         rows = collect(spaces)
     # An optional substring narrows the list — with 40 workspaces, scrolling
     # to the three you care about is the slow part.
@@ -3298,8 +3386,16 @@ def cmd_pick(argv):
 
     ws_by_ref = {w["ref"]: w for w in spaces}
     def reload():
-        """Re-scan for the picker's background refresh, same filter as above."""
-        sp = all_workspaces()
+        """Re-scan for the picker's background refresh, same filter as above.
+
+        A window that will not enumerate raises, which the refresher already
+        treats as "keep what is on screen": swapping in a partial map would
+        leave Enter parking from it, and there is nobody to ask mid-curses.
+        """
+        missing = []
+        sp = all_workspaces(missing)
+        if missing:
+            raise RuntimeError("partial workspace list")
         fresh = collect(sp)
         if terms:
             fresh = [r for r in fresh

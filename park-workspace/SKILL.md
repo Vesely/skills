@@ -69,8 +69,10 @@ A `⚠` row is a **parked entry with a session running in it**. Something resume
 the workspace behind park's back — a hand-run `cmux restore` after a reset does
 exactly this — and the row used to claim `❄ parked` and report the megabytes it
 freed days ago. It now shows the memory the workspace is holding *now* and
-counts as live. `park unpark` on it clears the stale entry without resuming
-anything; `park forget` does the same if you want the session left alone.
+counts as live — `--json` carries both numbers, `bytes` for what it holds and
+`freed_bytes` for what the entry recorded at park time. `park unpark` on it
+clears the stale entry without resuming anything; `park forget` does the same if
+you want the session left alone.
 
 **Exit codes.** `0` when every target reached the state you asked for — an
 already-parked workspace or an already-unparked one counts — and `1` when any
@@ -184,13 +186,20 @@ A scan is ~1.4 s across 45 workspaces, down from ~25 s. Keep it that way:
   tree is gone — normally well under 200 ms — and only spends its full budget
   on something genuinely stuck. Measured across three targets, the two changes
   together took a dry run from 10.1 s to 5.7 s.
-- **`unpark` stays serial.** It is nearly always one target, it hands the
-  terminal over with `exec` when it is, and each resume has to be folded into
-  the already-running set before the next one is considered.
+- **`unpark` batches too, in waves of 6** (smaller: each resume ends by waiting
+  for its claude to appear, and a wave of them booting at once is real load).
+  A single target keeps the old path — that is the one that can `exec`, and it
+  is what `park unpark .` runs at a parked prompt. Two live workspaces resumed
+  and verified in 6.2 s.
+  The one collision a per-workspace lock cannot see is **two ledger entries
+  naming the same session** — a bad re-key or a hand-edited ledger does it — so
+  the batch claims session ids in the parent, in target order, and dispatches
+  only the entries that got their claim. Results are printed in target order,
+  never in finishing order.
 
 ## Tests
 
-`python3 test_park.py` — 116 tests, stdlib `unittest`, ~1.4 s, no cmux required.
+`python3 test_park.py` — 120 tests, stdlib `unittest`, ~1.4 s, no cmux required.
 
 It covers the decisions made *before* anything is killed: who counts as a dev
 server, which claude processes are root sessions, whether a turn is in flight,
@@ -435,6 +444,15 @@ absolute path happily, at which point `unlink()` deletes something else.
   is not a lock, so a park that was SIGKILLed does not wedge the workspace.
 - **Never park what cannot be restored.** If the session id or cwd will not
   resolve, skip that workspace and say so, rather than killing it.
+- **Never park from a partial workspace map.** When a window will not
+  enumerate, its workspaces are simply absent — and `attribute` places what it
+  cannot match by workspace id using longest-prefix **cwd** matching, so their
+  sessions get handed to whichever listed workspace sits above them in the
+  tree. Parking that workspace then kills them, recorded under someone else's
+  entry. `park`, the bulk selectors and the picker all refuse on a partial list
+  (the picker's background re-scan just keeps what is on screen); `ls`, `doctor`
+  and the rest carry on with the warning, because reading a partial answer
+  costs nothing.
 - **Dev servers and test browsers are stopped but NOT restarted** on unpark.
   Only the claude session comes back; start dev servers yourself when needed.
 - **Only on request.** Never park automatically, on a timer, or as a side effect
