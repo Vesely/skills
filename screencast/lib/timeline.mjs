@@ -73,7 +73,13 @@ function mergeIntervals(intervals) {
 // Keep activity spans full; collapse idle gaps, which FREEZE on their first
 // frame (then hard-cut) rather than fast-forwarding the page.
 function buildTrim(keepIntervals, duration) {
-  const keeps = mergeIntervals(keepIntervals);
+  // Callers derive intervals from event times plus padding, which can reach past
+  // either end of the source. An interval ending after `duration` would emit a
+  // segment the video cannot supply, and the output runs long on a frozen frame.
+  const clamped = keepIntervals
+    .map(([a, b]) => [Math.max(0, Math.min(a, duration)), Math.max(0, Math.min(b, duration))])
+    .filter(([a, b]) => b > a);
+  const keeps = mergeIntervals(clamped);
   const segments = [];
   let cursor = 0;
   const pushIdle = (a, b) => {
@@ -144,10 +150,17 @@ function makeTrack(keyframes, { durationFn, easer, fields, arriveEarly = 0 }) {
     }
     const arrive = b.vt - arriveEarly;
     const dur = durationFn(a, b);
+    // The transition always ends exactly on `arrive`, so a keyframe holds until
+    // one transition-length before the next one. Effects stay framed for their
+    // whole duration because their rest keyframe is placed at holdUntil +
+    // zoomOutTime (see buildTimeline) — not by anything decided here. When the
+    // next keyframe lands sooner than that, the move is simply late rather than
+    // skipped: the camera has to be on target when the next action fires.
     const transStart = Math.max(a.vt, arrive - dur);
     if (vt <= transStart) return a;
     if (vt >= arrive) return b;
-    const s = easer((vt - transStart) / (arrive - transStart));
+    const span = arrive - transStart;
+    const s = span > 0 ? easer((vt - transStart) / span) : 1;
     const out = {};
     for (const f of fields) out[f] = lerp(a[f], b[f], s);
     return out;
@@ -204,7 +217,7 @@ export function buildTimeline(state, events, meta, flashVideoTime) {
       effects.push({ type: "highlight", vt, dur, box: e.box, mode: e.mode || "spotlight" });
       if (e.zoom !== false) {
         const c = boxCenter(e.box);
-        focusPoints.push({ vt, cx: c.x, cy: c.y, z: fitZoom(e.box) });
+        focusPoints.push({ vt, cx: c.x, cy: c.y, z: fitZoom(e.box), holdUntil: vt + dur });
       }
     } else if (e.type === "note") {
       const dur = e.dur || 3;
@@ -212,17 +225,65 @@ export function buildTimeline(state, events, meta, flashVideoTime) {
       effects.push({ type: "note", vt, dur, text: e.text, box: e.box, anchor, side });
       if (e.zoom && e.box) {
         const c = boxCenter(e.box);
-        focusPoints.push({ vt, cx: c.x, cy: c.y, z: fitZoom(e.box) });
+        focusPoints.push({ vt, cx: c.x, cy: c.y, z: fitZoom(e.box), holdUntil: vt + dur });
       }
     }
   }
 
   // --- Zoom / pan keyframes (unified across clicks + zoom-driving effects) ---
+  //
+  // Punch in for the action, then pull straight back to 1x. A keyframe holds its
+  // value until the next one, so feeding the track nothing but focus points
+  // parks the camera at high zoom for the whole take — the viewer never sees the
+  // app, only the control being poked, and never sees what the action changed.
+  // Hence an explicit rest keyframe at 1x after each focus.
+  //
+  // A rest is skipped when the next action lands too soon to fit going out and
+  // back in (zoomRestMin), so rapid sequences — ticking three checkboxes — stay
+  // zoomed instead of strobing once per click.
+  // Collapse focus points sharing an instant (a click and a zooming highlight can
+  // land together): the later one frames the shot, but the hold has to cover the
+  // longest effect at that instant.
   focusPoints.sort((a, b) => a.vt - b.vt);
-  const zoomKf = [{ vt: 0, cx: center.x, cy: center.y, z: 1 }, ...focusPoints];
+  const focus = [];
+  for (const f of focusPoints) {
+    const prev = focus[focus.length - 1];
+    if (prev && Math.abs(f.vt - prev.vt) < 1e-3) {
+      focus[focus.length - 1] = { ...f, holdUntil: Math.max(prev.holdUntil ?? 0, f.holdUntil ?? 0) };
+    } else {
+      focus.push(f);
+    }
+  }
+
+  const restVts = [];
+  const zoomKf = [{ vt: 0, cx: center.x, cy: center.y, z: 1 }];
+  for (let i = 0; i < focus.length; i++) {
+    const f = focus[i];
+    if (f.vt <= zoomKf[zoomKf.length - 1].vt) continue; // keyframes must strictly advance
+    zoomKf.push(f);
+    // Hold through the action *and* through any effect still on screen, or the
+    // camera pulls back while its own spotlight is still lit.
+    const restVt = Math.max(f.vt + CONFIG.zoomHold, f.holdUntil ?? 0) + CONFIG.zoomOutTime;
+    const next = focus[i + 1];
+    // Compare in integer ms: the documented zoomRestMin boundary is unreachable
+    // in binary floats (0.5499999999999998 < 0.55).
+    const gapMs = next ? Math.round((next.vt - CONFIG.zoomInTime - restVt) * 1000) : Infinity;
+    if (gapMs >= Math.round(CONFIG.zoomRestMin * 1000) && restVt < duration) {
+      zoomKf.push({ vt: restVt, cx: center.x, cy: center.y, z: 1 });
+      restVts.push(restVt);
+    }
+  }
   const lastAction = Math.max(0, ...clicks.map((c) => c.vt), ...keys.map((k) => k.vt), ...effects.map((e) => e.vt + e.dur));
-  const lastFocus = focusPoints.length ? focusPoints[focusPoints.length - 1] : { cx: center.x, cy: center.y };
-  zoomKf.push({ vt: Math.min(duration, lastAction + CONFIG.zoomOutTail), cx: lastFocus.cx, cy: lastFocus.cy, z: 1 });
+  const lastKf = zoomKf[zoomKf.length - 1];
+  const tailVt = Math.min(duration, lastAction + CONFIG.zoomOutTail);
+  // The closing pull-back eases in over zoomOutTime, so it must not begin before
+  // the last effect is over. Near the end of a take there may be no room left:
+  // then keep the framing rather than start a pull-back that the recording cuts
+  // off half way — which is the same defect as pulling back too early.
+  const tailStartsAfterHold = tailVt - CONFIG.zoomOutTime >= (lastKf.holdUntil ?? 0);
+  if (tailVt > lastKf.vt && tailStartsAfterHold) {
+    zoomKf.push({ vt: tailVt, cx: center.x, cy: center.y, z: 1 });
+  }
   const zoomAt = makeTrack(zoomKf, {
     durationFn: (a, b) => (b.z >= a.z ? CONFIG.zoomInTime : CONFIG.zoomOutTime),
     easer: smootherstep,
@@ -244,6 +305,12 @@ export function buildTimeline(state, events, meta, flashVideoTime) {
     keepIntervals.push([e.vt - CONFIG.keepPre, e.vt + CONFIG.keepPost]);
   }
   for (const e of effects) keepIntervals.push([e.vt - CONFIG.keepPre, e.vt + e.dur + 0.4]);
+  // keepPre is shorter than a zoom-in, so the head of the punch-in would fall in
+  // a frozen idle segment and the camera would jump instead of travel.
+  for (const f of focus) keepIntervals.push([f.vt - CONFIG.zoomInTime, f.vt]);
+  // The pull-back happens while nothing is being clicked, so without its own keep
+  // interval the trimmer would cut the very beat that shows the result.
+  for (const vt of restVts) keepIntervals.push([vt - CONFIG.zoomOutTime - 0.1, vt + 0.5]);
   keepIntervals.push([Math.max(0, lastAction - 0.1), Math.min(duration, lastAction + CONFIG.zoomOutTail + 0.4)]);
   const trim = buildTrim(keepIntervals, duration);
 

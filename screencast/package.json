@@ -3,10 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "bin": {
     "screencast": "bin/screencast.mjs"
   },
-  "description": "Turn an agent-browser session into a polished product-demo video (auto-zoom, cursor, keystrokes, chapters) fully locally.",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "description": "Turn an agent-browser session into a polished product-demo video (auto-zoom, cursor, keystrokes, chapters). Rendering runs entirely on your machine.",
   "dependencies": {
     "@napi-rs/canvas": "^0.1.55"
   }

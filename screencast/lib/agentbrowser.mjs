@@ -9,16 +9,28 @@ function baseArgs() {
   return SESSION ? ["--session", SESSION] : [];
 }
 
+// Our own options are appended, except that they must land *before* any `--`
+// separator the caller passed: everything after it is literal input, so a
+// trailing `--session` would be typed into the page instead of selecting a
+// session. Subcommands can be two words (`get box`), so nothing is inserted at
+// the front.
+export function withSession(args) {
+  const base = baseArgs();
+  if (!base.length) return args;
+  const sep = args.indexOf("--");
+  return sep === -1 ? [...args, ...base] : [...args.slice(0, sep), ...base, ...args.slice(sep)];
+}
+
 // Run an agent-browser subcommand, inheriting stdio so the agent sees output
 // (snapshots, refs, errors). Returns the exit code.
 export function passthrough(args) {
-  const r = run(BIN, [...args, ...baseArgs()], { stdio: "inherit" });
+  const r = run(BIN, withSession(args), { stdio: "inherit" });
   return r.code;
 }
 
 // Run an agent-browser subcommand and capture its output (for internal use).
 export function capture(args) {
-  return run(BIN, [...args, ...baseArgs()]);
+  return run(BIN, withSession(args));
 }
 
 // Resolve the bounding box (viewport CSS px) of a selector or @ref.
@@ -34,6 +46,22 @@ export function getBox(selector) {
     /* fall through */
   }
   return null;
+}
+
+// Read an attribute off a selector or @ref.
+// Tri-state on purpose: callers must tell "the element has no such attribute"
+// (ok, value null) apart from "the question could not be answered" (not ok), so
+// a failed lookup can fail closed instead of reading as a negative answer.
+export function getAttr(selector, name) {
+  const r = capture(["get", "attr", selector, name, "--json"]);
+  if (r.code !== 0) return { ok: false, value: null };
+  try {
+    const parsed = JSON.parse(r.stdout.trim());
+    const v = parsed.data ?? parsed;
+    return { ok: true, value: typeof v === "string" ? v : null };
+  } catch {
+    return { ok: false, value: null };
+  }
 }
 
 // Center point of a selector's box, or null.
