@@ -29,13 +29,18 @@ export const CONFIG = {
   shadowTight: { blur: 26, offsetY: 10, alpha: 0.35 },
   shadowAmbient: { blur: 90, offsetY: 44, alpha: 0.3 },
 
-  // Zoom / pan (element-fit: target element fills ~zoomTargetFrac of the frame)
-  zoomTargetFrac: 0.42,
-  zoomMin: 1.2,
-  zoomMax: 2.1,
-  zoomInTime: 0.55, // ease-in when moving to a new focus
-  zoomOutTime: 1.05, // slower ease-out (feels deliberate)
-  zoomOutTail: 0.8, // seconds after last action before easing back to 1x
+  // Zoom / pan (element-fit: target element fills ~zoomTargetFrac of the frame).
+  // The camera punches in for an action and pulls straight back to 1x, so the
+  // whole app — and what the action changed — is visible between beats. Keep
+  // zoomMax modest: a demo that lives at high zoom shows a control, not a product.
+  zoomTargetFrac: 0.34,
+  zoomMin: 1.0, // 1.0 = an element already big enough gets no zoom at all
+  zoomMax: 1.7,
+  zoomInTime: 0.55, // ease-in, finishes exactly as the action fires
+  zoomOutTime: 0.9, // ease back out to 1x
+  zoomHold: 0.85, // seconds held at full zoom after the action, before pulling back
+  zoomRestMin: 0.55, // min time at 1x to make a pull-back worth it; under this, stay in
+  zoomOutTail: 0.8, // when the closing pull-back *arrives* at 1x, measured from the last action
 
   // Cursor
   cursorScale: 1.5,
