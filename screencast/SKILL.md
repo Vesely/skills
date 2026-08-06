@@ -44,7 +44,9 @@ raw capture into a cinematic MP4 — locally, with no paid tool and no upload.
 - `ffmpeg` + `ffprobe` on PATH
 - Node 24+ — the renderer itself only needs 18+, but current `agent-browser` declares
   `engines.node >= 24`, so that is the real floor. It auto-installs `@napi-rs/canvas` (a prebuilt
-  binary, no compilation) into the skill directory on first run.
+  binary, no compilation) into the skill directory on first run, at the exact version `package.json`
+  pins, so the renderer never moves onto an untested build behind your back. To upgrade it, change
+  that version and delete `node_modules/`.
 
 Rendering is entirely local. The *capture* is whatever `agent-browser` is configured to drive, so
 "no cloud" holds for a local browser; a remote/cloud provider would host the page itself elsewhere.

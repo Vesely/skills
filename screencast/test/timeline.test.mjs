@@ -212,6 +212,22 @@ test("stop retires the active take but render can still find it", () => {
   });
 });
 
+test("a take reused from a laxer umask is tightened, not left readable", () => {
+  inTempCwd((cwd) => {
+    // The event log holds typed text. `mode:` on writeFileSync only applies to
+    // a file it creates, so a take recorded twice would keep the first run's
+    // permissions.
+    const dir = state.sessionDir("demo", cwd);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+    fs.writeFileSync(path.join(dir, "events.jsonl"), "stale\n", { mode: 0o644 });
+    state.initState("demo", { name: "demo" }, cwd);
+    const mode = (f) => fs.statSync(path.join(dir, f)).mode & 0o777;
+    assert.equal(mode("events.jsonl"), 0o600, "typed text is owner-only");
+    assert.equal(mode("state.json"), 0o600);
+    assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+  });
+});
+
 test("a take name cannot escape the session directory", () => {
   for (const bad of ["../project", "a/b", "..", ".", "", "-lead", "a\\b", "x/../../y"]) {
     assert.throws(() => state.assertSafeName(bad), /invalid recording name/, `rejected ${JSON.stringify(bad)}`);
