@@ -36,6 +36,8 @@ park .                     park the workspace you are in
 park park <target>...      park workspace(s)  [--dry-run] [--force] [--kill-anyway]
 park park --idle 3d        park everything idle that long (asks first)
 park park --all            park everything parkable (asks first)
+park . --close-tab         park, then close the tab park itself runs in
+                           (what the ⌥⇧P action uses)
 park unpark <target>...    resume a parked workspace
 park show <target>         dump the ledger entry
 park forget <target>       drop a stale ledger entry without resuming
@@ -175,6 +177,23 @@ A scan is ~1.4 s across 45 workspaces, down from ~25 s. Keep it that way:
   file. `park park window:4 --dry-run` was 17.8 s for 20 targets; it now does 31
   in 11.4 s. Each wave takes its own snapshot, and `attribute()` overlaps with
   the 2 s CPU window that would otherwise be pure sleeping.
+- **The CPU window runs underneath everything else.** It is two seconds of
+  sleeping, so it starts before the workspace listing and is only collected at
+  the gate — after attribution, the draft read, the status round-trip and the
+  session lookup have all happened alongside it. It runs on a plain daemon
+  thread rather than a `ThreadPoolExecutor`, whose workers are joined at
+  interpreter exit: a park that never consults the window (already parked, no
+  claude session, any early refusal) used to sit for the full two seconds
+  before the process could end. That path is now 1.3 s instead of 2.4 s.
+- **The tail is one fan-out.** The prefill, the pill, the colour, the pinned
+  name and the after-fingerprint are five independent ~250 ms round-trips, and
+  sequentially they were the biggest slice of a single park after the CPU
+  window; the same goes for the two reads in the pre-kill re-check. A real
+  single park measured 4.3 s before, 3.75 s after, and what is left is
+  irreducible: ~2 s of CPU window (overlapped) and ~1.2 s waiting for the
+  session tree to actually die after SIGTERM. The prefill in particular cannot
+  move earlier — it has to land on a shell prompt, which only exists once
+  claude is gone.
 - **A wave shares one CPU window.** `cpu_snapshots()` is system-wide and
   corroborates eight workspaces as well as one. Per *wave* rather than per
   batch on purpose: the old single reading was taken once and never refreshed,
@@ -199,7 +218,7 @@ A scan is ~1.4 s across 45 workspaces, down from ~25 s. Keep it that way:
 
 ## Tests
 
-`python3 test_park.py` — 120 tests, stdlib `unittest`, ~1.4 s, no cmux required.
+`python3 test_park.py` — 125 tests, stdlib `unittest`, ~1.4 s, no cmux required.
 
 It covers the decisions made *before* anything is killed: who counts as a dev
 server, which claude processes are root sessions, whether a turn is in flight,
@@ -575,17 +594,30 @@ Command Palette.
                  "target": "newTabInCurrentPane", "shortcut": "cmd+alt+p",
                  "keywords": ["park", "freeze", "ram"] },
   "park-here": { "type": "command", "title": "Park this workspace",
-                 "command": "/Users/you/.local/bin/park .",
+                 "command": "/Users/you/.local/bin/park . --close-tab",
                  "target": "newTabInCurrentPane", "shortcut": "cmd+alt+f",
                  "confirm": true }
 }
 ```
 
-`cmux reload-config` applies it without a restart. Four things that bite:
+`cmux reload-config` applies it without a restart. Five things that bite:
 
-- `target` must be **`newTabInCurrentPane`**, never `currentTerminal` — the
-  current terminal is normally the claude session being parked, so the command
-  would be typed into its input box instead of a shell.
+- **There is no background target.** The two values are `currentTerminal` and
+  `newTabInCurrentPane` (read out of the app binary; the schema declares
+  `actions` as free-form and documents neither), so an action always runs in a
+  terminal you can see. `currentTerminal` is not the way out: the current
+  terminal is normally the claude session being parked, so the command would be
+  typed into its input box instead of a shell.
+- **`--close-tab` is the way out instead.** The tab has to open; it does not
+  have to stay. After a clean park it focuses the workspace's agent tab and
+  closes its own — measured end to end at ~4 s from keypress to a closed tab
+  and the cursor sitting on `❯ park unpark .` in the agent tab, with the pill
+  reading `Parked · 364 MB freed`. A refusal or a note keeps the tab open,
+  because that text is the whole reason to look.
+  Focusing needs a workaround of its own: cmux has no "select this surface"
+  verb, and `move-surface --focus true` without a position flag sends the tab
+  to the END of the pane (measured). Pass the index it already has and the move
+  is a no-op.
 - Use an **absolute path** to `park`: the action is not run through a login
   shell, so `~/.local/bin` is not necessarily on its PATH.
 - `park .` (shorthand for `park park .`) resolves `.` from the

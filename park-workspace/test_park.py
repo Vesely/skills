@@ -292,6 +292,69 @@ class TestLedgerClaim(unittest.TestCase):
         self.assertEqual(p.stat().st_mode & 0o077, 0)
 
 
+class TestHandBackTab(unittest.TestCase):
+    """The shortcut's tab closes itself — but only when there is nothing to read."""
+
+    WS, MINE, AGENT = "ws-one", "SURFACE-PARK", "SURFACE-AGENT"
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.real = {k: getattr(park, k) for k in
+                     ("LEDGER", "cmux_do", "focus_surface")}
+        park.LEDGER = Path(self.dir.name)
+        self.calls = []
+        park.cmux_do = lambda *a: self.calls.append(a) or True
+        park.focus_surface = lambda ws, s: self.calls.append(("focus", ws, s))
+        os.environ["CMUX_SURFACE_ID"] = self.MINE
+        os.environ["CMUX_WORKSPACE_ID"] = self.WS
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        for k, v in self.real.items():
+            setattr(park, k, v)
+        for k in ("CMUX_SURFACE_ID", "CMUX_WORKSPACE_ID"):
+            os.environ.pop(k, None)
+
+    def parked(self):
+        park.write_entry(park.ledger_path(self.WS),
+                         {"workspace_id": self.WS, "title": "demo",
+                          "sessions": [{"session_id": "s", "surface": self.AGENT}]})
+
+    def ok(self, notes=()):
+        return [{"ok": True, "notes": list(notes), "ref": "workspace:1"}]
+
+    def test_a_clean_park_focuses_the_agent_tab_then_closes_ours(self):
+        self.parked()
+        self.assertTrue(park.hand_back_tab(self.ok()))
+        self.assertEqual(self.calls[0], ("focus", self.WS, self.AGENT))
+        self.assertIn("close-surface", self.calls[-1])
+        self.assertIn(self.MINE, self.calls[-1])
+
+    def test_a_refusal_leaves_the_tab_open(self):
+        self.parked()
+        self.assertFalse(park.hand_back_tab(
+            [{"ok": False, "notes": [], "ref": "workspace:1"}]))
+        self.assertEqual(self.calls, [])
+
+    def test_a_note_leaves_the_tab_open(self):
+        # Notes are the one thing worth reading, and closing is how they get
+        # missed.
+        self.parked()
+        self.assertFalse(park.hand_back_tab(self.ok(["pill would not set"])))
+        self.assertEqual(self.calls, [])
+
+    def test_it_does_nothing_when_this_workspace_was_not_the_one_parked(self):
+        self.assertFalse(park.hand_back_tab(self.ok()))
+        self.assertEqual(self.calls, [])
+
+    def test_it_does_nothing_outside_a_cmux_pane(self):
+        self.parked()
+        del os.environ["CMUX_SURFACE_ID"]
+        self.assertFalse(park.hand_back_tab(self.ok()))
+        self.assertEqual(self.calls, [])
+
+
 class TestOpLock(unittest.TestCase):
     """Claiming the entry is not enough: park publishes it BEFORE it kills."""
 

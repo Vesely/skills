@@ -140,6 +140,34 @@ def pmap(fn, items, workers=24):
         return list(ex.map(fn, items))
 
 
+def background(fn):
+    """Start fn now, hand back a getter that blocks for its value.
+
+    Not a ThreadPoolExecutor: its workers are joined at interpreter exit, so a
+    park that never consults the CPU window — "already parked", "no claude
+    session", any early refusal — still sat for the full two seconds before the
+    process could end. A daemon thread nobody waits for costs nothing.
+    """
+    box, done = {}, threading.Event()
+
+    def run():
+        try:
+            box["value"] = fn()
+        except BaseException as ex:          # re-raised in the caller's frame
+            box["error"] = ex
+        finally:
+            done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+
+    def get():
+        done.wait()
+        if "error" in box:
+            raise box["error"]
+        return box["value"]
+    return get
+
+
 class Spinner:
     """Immediate feedback on stderr while a scan runs.
 
@@ -1110,9 +1138,15 @@ def git_info(cwd):
 
 
 # --- Resolve targets ---------------------------------------------------------
-def resolve_targets(args):
-    """Accept workspace refs/UUIDs/titles, `window:N`, or `.`."""
-    spaces = all_workspaces()
+def resolve_targets(args, spaces=None):
+    """Accept workspace refs/UUIDs/titles, `window:N`, or `.`.
+
+    `spaces` lets a caller that already has the list hand it over. Listing the
+    workspaces is a socket round-trip per window (0.42 s here), and `park .`
+    used to pay it twice: once to work out what `.` means and once more to
+    attribute processes to it.
+    """
+    spaces = all_workspaces() if spaces is None else spaces
     by_ref = {w["ref"]: w for w in spaces}
     by_id = {w["id"]: w for w in spaces}
     out, seen = [], set()
@@ -1217,13 +1251,14 @@ def flag_value(argv, name):
     return value, out
 
 
-def targets_from(argv, msg="no target"):
+def targets_from(argv, msg="no target", spaces=None):
     """Positional args -> workspaces. Every command takes targets this way.
 
     resolve_targets dies on an arg it cannot match, so an empty result can only
     mean the command was given no target at all.
     """
-    targets = resolve_targets([a for a in argv if not a.startswith("--")])
+    targets = resolve_targets([a for a in argv if not a.startswith("--")],
+                              spaces)
     if not targets:
         die(msg)
     return targets
@@ -1796,15 +1831,6 @@ def _park_one(w, by_ws, table, dry=False, force=False, brutal=False,
             return res
 
     state = workspace_status(w["id"]).get("claude_code", "")
-    # The whole tree, not the roots. A turn that shells out to a compiler or a
-    # test run leaves the root claude near 0% while the machine is flat out, so
-    # sampling roots alone reported "idle" for the busiest workspaces there are
-    # — and with no status pill (about a third of them) and a tool call that
-    # writes nothing for 20 s, this is the only gate left standing.
-    if (cpu_sample(tree_pids(claude, table), snaps=snaps) > 15.0
-            and not (force or brutal)):
-        res["msg"] = "busy (cpu)"
-        return res
 
     sessions = []
     for p in claude:
@@ -1820,6 +1846,23 @@ def _park_one(w, by_ws, table, dry=False, force=False, brutal=False,
         sessions.append({"session_id": sid, "transcript": transcript,
                          "cwd": cwd, "resume_command": command,
                          "id_source": source, "surface": p["surface"]})
+
+    # The whole tree, not the roots. A turn that shells out to a compiler or a
+    # test run leaves the root claude near 0% while the machine is flat out, so
+    # sampling roots alone reported "idle" for the busiest workspaces there are
+    # — and with no status pill (about a third of them) and a tool call that
+    # writes nothing for 20 s, this is the only gate left standing.
+    #
+    # Read here rather than earlier because `snaps` may still be in flight: the
+    # sample is two seconds of sleeping, and everything above — listing,
+    # attribution, the draft read, the status round-trip, resolving each
+    # session — runs alongside it instead of after it. `--force`/`--kill-anyway`
+    # skip the gate, so they never wait for it at all.
+    if not (force or brutal):
+        window = snaps() if callable(snaps) else snaps
+        if cpu_sample(tree_pids(claude, table), snaps=window) > 15.0:
+            res["msg"] = "busy (cpu)"
+            return res
 
     if not brutal:
         stale, why = busy_verdict(state, sessions)
@@ -1867,18 +1910,20 @@ def _park_one(w, by_ws, table, dry=False, force=False, brutal=False,
         # The same verdict, not a weaker version of it: re-reading only the
         # pill was a no-op for a workspace that has none, and would have
         # re-refused the stale-pill workspace this just cleared.
-        again = workspace_status(w["id"]).get("claude_code", "")
+        #
+        # The pill read and the draft read are independent round-trips, so
+        # they go together — this is the last thing standing between the user
+        # and a kill, and it should not also be the slowest.
+        again, draft = pmap(lambda f: f(), [
+            lambda: workspace_status(w["id"]).get("claude_code", ""),
+            # Seconds have passed since the first draft check — a CPU window, a
+            # status round-trip and a session lookup per tab. Typing into a
+            # workspace while looking at it takes less than that, and the draft
+            # is the one thing here with no copy anywhere.
+            lambda: draft_guard(w["id"], claude)])
         _, why = busy_verdict(again, sessions)
-        if why:
-            res["msg"] = f"became busy — {why}"
-            return res
-        # Seconds have passed since the first draft check — a CPU window, a
-        # status round-trip and a session lookup per tab. Typing into a
-        # workspace while looking at it takes less than that, and the draft is
-        # the one thing here with no copy anywhere.
-        why = draft_guard(w["id"], claude)
-        if why:
-            res["msg"] = f"became busy — {why}"
+        if why or draft:
+            res["msg"] = f"became busy — {why or draft}"
             return res
 
     # Claiming the ledger file atomically IS the "already parked" guard: the
@@ -1932,31 +1977,45 @@ def _park_one(w, by_ws, table, dry=False, force=False, brutal=False,
             "running: " + ", ".join(f"{p['pid']} {p['cmd'][:40]}"
                                     for p in stubborn))
 
-    after = worktree_fingerprint(cwd)
+    # Everything left is independent: a git call and four cmux writes, each a
+    # ~250 ms round-trip. Run sequentially they were the largest slice of a
+    # single park after the CPU window.
+    #
+    # The prefill leaves a command TYPED (not run) at every agent tab's prompt,
+    # so the workspace comes back by walking into any of them and pressing
+    # enter. `park unpark .` rather than the raw resume line: cmux's recorded
+    # command is an unreadable escaped one-liner, and this way enter also
+    # clears the pill and the ledger. The pill, the colour and the pinned name
+    # are how a parked workspace announces itself in the sidebar — losing one
+    # silently is how a workspace ends up parked and indistinguishable from a
+    # live one, so each failure is reported rather than assumed away.
+    jobs = {
+        "worktree": lambda: worktree_fingerprint(cwd),
+        "prefill": lambda: all(send_text(PREFILL, w["id"], s.get("surface"))
+                               for s in sessions),
+        "pill": lambda: cmux_do("set-status", PILL_KEY,
+                                f"Parked · {human(freed)} freed",
+                                "--icon", "snowflake", "--color", "#5AC8FA",
+                                "--priority", "90", "--workspace", w["id"]),
+        "colour": lambda: cmux_do("workspace-action", "--action", "set-color",
+                                  "--color", PARKED_COLOR,
+                                  "--workspace", w["id"]),
+        "title": lambda: pin_title(w, title),
+    }
+    names = list(jobs)
+    outcome = dict(zip(names, pmap(lambda n: jobs[n](), names)))
+
+    after = outcome["worktree"]
     if before and after != before:
         res["notes"].append(f"WORKTREE CHANGED during park: {before} -> {after}")
-
-    # Leave a command typed (not run) at every agent tab's prompt, so the
-    # workspace comes back by walking into any of them and pressing enter.
-    # `park unpark .` rather than the raw resume line: cmux's recorded command
-    # is an unreadable escaped one-liner, and this way enter also clears the
-    # pill and the ledger. One workspace parks and resumes as a unit, so it does
-    # not matter which tab you land on.
-    if not all(send_text(PREFILL, w["id"], s.get("surface")) for s in sessions):
+    if not outcome["prefill"]:
         res["notes"].append("the resume command could not be typed at every "
                             "prompt — unpark it by name (`park unpark <ref>`)")
-
-    # These are how a parked workspace announces itself in the sidebar. Losing
-    # them silently is how a workspace ends up parked and indistinguishable
-    # from a live one, so a failure is reported rather than assumed away.
-    if not cmux_do("set-status", PILL_KEY, f"Parked · {human(freed)} freed",
-                   "--icon", "snowflake", "--color", "#5AC8FA",
-                   "--priority", "90", "--workspace", w["id"]):
+    if not outcome["pill"]:
         res["notes"].append("cmux would not set the parked pill")
-    if not cmux_do("workspace-action", "--action", "set-color", "--color",
-                   PARKED_COLOR, "--workspace", w["id"]):
+    if not outcome["colour"]:
         res["notes"].append("cmux would not dim the workspace colour")
-    if pin_title(w, title):
+    if outcome["title"]:
         # Recorded so unpark clears only a name we set, never the user's own.
         entry["pinned_title"] = True
         write_entry(ledger_path(w["id"]), entry)
@@ -2330,6 +2389,56 @@ def _unpark_one(w, allow_exec=False, live_ids=None):
     return res
 
 
+def focus_surface(ws_id, surface_id):
+    """Select a tab without moving it.
+
+    cmux has no "focus this surface" verb. `move-surface --focus true` is the
+    closest thing, but with no position flag it also sends the tab to the END
+    of the pane — measured: a two-tab pane came back reordered. Passing the
+    index the surface already has makes the move a no-op and leaves only the
+    focus.
+    """
+    try:
+        data = cmux_json("list-pane-surfaces", "--workspace", ws_id)
+    except (RuntimeError, json.JSONDecodeError):
+        return False
+    idx = next((s.get("index") for s in data.get("surfaces", [])
+                if surface_id in (s.get("id"), s.get("ref"))), None)
+    if idx is None:
+        return False
+    return cmux_do("move-surface", "--surface", surface_id, "--workspace",
+                   ws_id, "--index", str(idx), "--focus", "true")
+
+
+def hand_back_tab(results):
+    """Focus the agent tab and close the tab park is running in.
+
+    For the keyboard shortcut. cmux actions have exactly two targets —
+    `currentTerminal`, which would type into the agent's own prompt, and
+    `newTabInCurrentPane` — so a tab is unavoidable; it does not have to STAY.
+    The workspace's own pill records what was freed, which is the feedback that
+    outlives the tab anyway.
+
+    Only after a clean park of the workspace this tab is in. A refusal or a
+    note is the one thing worth reading, and closing the tab is exactly how it
+    would be missed.
+    """
+    mine, here = (os.environ.get("CMUX_SURFACE_ID"),
+                  os.environ.get("CMUX_WORKSPACE_ID"))
+    if not mine or not here:
+        return False
+    entry = read_entry(ledger_path(here))
+    if not entry or not any(r["ok"] and not r["notes"] for r in results):
+        return False
+    for s in entry.get("sessions", []):
+        # The tab the prefill was typed into: land the user on the command
+        # that brings the workspace back.
+        if s.get("surface") and s["surface"] != mine:
+            focus_surface(here, s["surface"])
+            break
+    return cmux_do("close-surface", "--surface", mine, "--workspace", here)
+
+
 def confirm_kill_anyway(targets):
     """Make the one flag that can lose a running turn a deliberate act.
 
@@ -2358,35 +2467,46 @@ def cmd_park(argv):
     brutal = "--kill-anyway" in argv
     idle, argv = flag_value(argv, "--idle")
     bulk = "--all" in argv
+    close_tab = "--close-tab" in argv
     if brutal and (bulk or idle):
         # Selecting in bulk and overriding the two guards that protect a
         # running turn are individually defensible and together are not.
         die("--kill-anyway cannot be combined with --all or --idle — name the "
             "workspaces you mean")
 
-    if bulk or idle:
-        if [a for a in argv if not a.startswith("--")]:
-            die("--all and --idle choose the targets themselves — "
-                "do not name any")
-        targets, spaces = bulk_targets(idle)
-        if not targets:
-            print("  nothing matches\n")
-            return 0
-        if not dry and not confirm_bulk(targets, idle):
-            return 1
-    else:
-        targets = targets_from(
-            argv,
-            "no target — pass a workspace ref, a title, `window:N`, or `.`")
-        spaces = None
-        if brutal:
-            confirm_kill_anyway(targets)
+    # The CPU window is two seconds of sleeping. Start it before the workspace
+    # listing so it runs underneath everything that follows — for a single
+    # target that is most of the wait. After a confirmation prompt instead,
+    # where it would otherwise go stale while the user reads.
+    pending = None
+    if True:
+        if bulk or idle:
+            if [a for a in argv if not a.startswith("--")]:
+                die("--all and --idle choose the targets themselves — "
+                    "do not name any")
+            targets, spaces = bulk_targets(idle)
+            if not targets:
+                print("  nothing matches\n")
+                return 0
+            if not dry and not confirm_bulk(targets, idle):
+                return 1
+        else:
+            pending = background(cpu_snapshots)
+            with Spinner("looking at the workspaces…"):
+                spaces = workspaces_for_park()
+            targets = targets_from(
+                argv,
+                "no target — pass a workspace ref, a title, `window:N`, or `.`",
+                spaces=spaces)
+            if brutal:
+                confirm_kill_anyway(targets)
+        return park_targets(targets, spaces, pending,
+                            dry, force, brutal, close_tab)
 
-    if spaces is None:
-        with Spinner("looking at the workspaces…"):
-            spaces = workspaces_for_park()
 
-    total, done, refused = 0, 0, 0
+def park_targets(targets, spaces, pending, dry, force, brutal,
+                 close_tab=False):
+    total, done, refused, seen = 0, 0, 0, []
     # In waves, not one at a time. Everything a park does is I/O — cmux socket
     # round-trips, a CPU window, git — and the picker has always parked rows
     # concurrently; only the CLI paid for 20 workspaces one after another
@@ -2396,13 +2516,11 @@ def cmd_park(argv):
     # start, so late targets were judged on a reading minutes old.
     for i in range(0, len(targets), PARK_WAVE):
         wave = targets[i:i + PARK_WAVE]
+        if pending is None:              # every wave gets its own reading
+            pending = background(cpu_snapshots)
         with Spinner("checking what is safe to park…"):
-            # The CPU window is two seconds of sleeping and attribution is a
-            # `ps` sweep plus lsof; neither needs the other, so they overlap.
-            with ThreadPoolExecutor(max_workers=2) as ex:
-                f_procs = ex.submit(lambda: (attribute(spaces), ps_table()))
-                f_snaps = ex.submit(cpu_snapshots)
-                (by_ws, table), snaps = f_procs.result(), f_snaps.result()
+            by_ws, table = attribute(spaces), ps_table()
+        snaps, pending = pending, None
         results = pmap(
             lambda w: park_one(w, by_ws, table, dry=dry, force=force,
                                brutal=brutal, snaps=snaps),
@@ -2410,6 +2528,7 @@ def cmd_park(argv):
         # Printed in the order the targets were named, never in the order the
         # workers happened to finish.
         for r in results:
+            seen.append(r)
             mark = ("would park" if dry else "❄") if r["ok"] else "skip"
             print(f"  {mark:<11} {r['ref']:<13} {r['title'][:38]:<40} {r['msg']}")
             for n in r["notes"]:
@@ -2421,6 +2540,9 @@ def cmd_park(argv):
                 refused += 1
     verb = "would free" if dry else "freed"
     print(f"\n  {done} workspace(s), {verb} {human(total)}\n")
+    if close_tab and not dry:
+        # Never returns when it works: closing this surface ends the process.
+        hand_back_tab(seen)
     return 1 if refused else 0
 
 
@@ -3434,6 +3556,9 @@ USAGE = """park — free RAM from idle cmux workspaces without closing them
 
 targets:  workspace:12 | <uuid> | <title substring> | window:2 | .
 
+--close-tab  after a clean park, focus the agent tab and close the tab park is
+             running in. For the ⌥⇧P action, which has to open one.
+
 overrides: --force        waive the CPU sample (corroboration only)
            --kill-anyway  waive the draft guard and the in-flight verdict too;
                           asks for confirmation, needs a terminal. Never
@@ -3452,7 +3577,8 @@ servers yourself.
 
 KNOWN_FLAGS = {
     "ls": ("--json",), "list": ("--json",),
-    "park": ("--dry-run", "--force", "--kill-anyway", "--idle", "--all"),
+    "park": ("--dry-run", "--force", "--kill-anyway", "--idle", "--all",
+             "--close-tab"),
     "pick": (), "unpark": (), "resume": (), "show": (),
     "forget": (), "doctor": (), "rebuild": ("--dry-run", "--closed"),
     "rekey": ("--dry-run",), "repaint": ("--dry-run",),
