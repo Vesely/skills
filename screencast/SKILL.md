@@ -1,18 +1,16 @@
 ---
 name: screencast
 description: >-
-  Turn an agent-browser session into a polished, professional product-demo video — fully local, free, no
-  cloud upload. Records the browser to WebM while logging every action, then composites an MP4 with
-  automatic zoom-to-click, a smooth animated cursor with trail, click ripples, an on-screen keystroke
-  overlay (keycast), idle-time trimming, chapter markers (both burned-in lower-thirds and embedded MP4
-  chapters), and a gradient background with a rounded, shadowed browser card. Use this whenever the user
-  wants to record or generate a demo video, screencast, walkthrough, "how it works" clip, or animated
-  screen recording of a web flow — especially one that looks like Screen Studio (auto-zoom, keystrokes,
-  chapters) but produced by the agent itself. Trigger on "record a demo", "make a screencast", "generate
-  a walkthrough video", "screen recording of this flow", "demo video with zooms and chapters", "record the
-  signup/onboarding flow". Built on top of the
-  agent-browser CLI; requires ffmpeg and Node. Not for live screen capture of the whole desktop — it
-  records a browser flow the agent drives.
+  Turn an agent-browser session into a polished product-demo video — fully local, free, no cloud upload.
+  Records the browser to WebM while logging every action, then composites an MP4 with automatic
+  zoom-to-click, a smooth animated cursor with trail, click ripples, a keystroke overlay (keycast), idle
+  trimming, chapters (burned-in lower-thirds plus embedded MP4 chapters), and a gradient background with a
+  rounded, shadowed browser card. Use this whenever the user wants to record or generate a demo video,
+  screencast, walkthrough, "how it works" clip, or animated screen recording of a web flow — especially one
+  that looks like Screen Studio (auto-zoom, keystrokes, chapters) but produced by the agent itself. Trigger
+  on "record a demo", "make a screencast", "generate a walkthrough video", "demo video with zooms and
+  chapters", "record the signup/onboarding flow". Built on the agent-browser CLI; requires ffmpeg and Node.
+  Not for live screen capture of the whole desktop — it records a browser flow the agent drives.
 ---
 
 # screencast
@@ -44,7 +42,9 @@ raw capture into a cinematic MP4 — locally, with no paid tool and no upload.
 - `ffmpeg` + `ffprobe` on PATH
 - Node 24+ — the renderer itself only needs 18+, but current `agent-browser` declares
   `engines.node >= 24`, so that is the real floor. It auto-installs `@napi-rs/canvas` (a prebuilt
-  binary, no compilation) into the skill directory on first run.
+  binary, no compilation) into the skill directory on first run, at the exact version `package.json`
+  pins, so the renderer never moves onto an untested build behind your back. To upgrade it, change
+  that version and delete `node_modules/`.
 
 Rendering is entirely local. The *capture* is whatever `agent-browser` is configured to drive, so
 "no cloud" holds for a local browser; a remote/cloud provider would host the page itself elsewhere.

@@ -75,8 +75,20 @@ export function getLast(cwd = process.cwd()) {
 export function initState(name, state, cwd = process.cwd()) {
   const dir = sessionDir(name, cwd);
   fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
-  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(state, null, 2), { mode: FILE_MODE });
-  fs.writeFileSync(path.join(dir, "events.jsonl"), "", { mode: FILE_MODE });
+  const stateFile = path.join(dir, "state.json");
+  const eventFile = path.join(dir, "events.jsonl");
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), { mode: FILE_MODE });
+  fs.writeFileSync(eventFile, "", { mode: FILE_MODE });
+  // `mode` only applies when the file is created, and both the directory and
+  // the files may already exist from an earlier take under a laxer umask. This
+  // is the one place a take is set up, so tighten them here for its lifetime.
+  for (const f of [dir, stateFile, eventFile]) {
+    try {
+      fs.chmodSync(f, f === dir ? DIR_MODE : FILE_MODE);
+    } catch {
+      // Not our file to tighten (odd ownership) — recording still works.
+    }
+  }
   setActive(name, cwd);
 }
 

@@ -30,7 +30,8 @@ npx skills@latest add Vesely/skills/screencast
 
 - `ffmpeg` + `ffprobe` on PATH
 - Node 24+ (required by current `agent-browser`; the renderer itself needs only 18+). It
-  auto-installs the prebuilt `@napi-rs/canvas` on first run — no compilation.
+  auto-installs the prebuilt `@napi-rs/canvas` on first run, at the version `package.json` pins — no
+  compilation, no surprise upgrades.
 
 "Fully local" assumes a local browser: rendering never leaves your machine, but the capture is
 whatever `agent-browser` is pointed at, so a cloud-browser provider would put the page itself

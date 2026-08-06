@@ -37,16 +37,26 @@ function usage() {
   );
 }
 
+const CANVAS = "@napi-rs/canvas";
+
 async function ensureDeps() {
   try {
-    await import("@napi-rs/canvas");
+    await import(CANVAS);
     return;
   } catch {
-    log("installing @napi-rs/canvas (first run)…");
-    const r = run("npm", ["install", "--prefix", SKILL_ROOT, "--no-audit", "--no-fund", "@napi-rs/canvas"], {
+    // Install the version package.json declares, not whatever is newest.
+    // `npm install <name>` resolves to the newest match *and rewrites the range
+    // it found*, which both dirties a checked-out skill and silently moves the
+    // renderer onto an untested build; `--no-save` plus an explicit spec keeps
+    // the declared version the only source of truth.
+    const pkg = JSON.parse(fs.readFileSync(path.join(SKILL_ROOT, "package.json"), "utf8"));
+    const spec = pkg.dependencies?.[CANVAS];
+    if (!spec) throw new Error(`package.json no longer declares ${CANVAS}`);
+    log(`installing ${CANVAS}@${spec} (first run)…`);
+    const r = run("npm", ["install", "--prefix", SKILL_ROOT, "--no-audit", "--no-fund", "--no-save", `${CANVAS}@${spec}`], {
       stdio: "inherit",
     });
-    if (r.code !== 0) throw new Error("failed to install @napi-rs/canvas");
+    if (r.code !== 0) throw new Error(`failed to install ${CANVAS}@${spec}`);
   }
 }
 
