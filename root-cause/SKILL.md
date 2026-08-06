@@ -1,6 +1,6 @@
 ---
 name: root-cause
-description: Use when a defect's mechanism is known and the change you are about to ship may leave it intact — prompt/instruction tweaks, retries, warnings, post-hoc repair, fallbacks, guards downstream of the bad value — or when cost, risk, validation difficulty or scope is steering you toward a substitute. Fires on YOUR OWN reasoning, not just the user's words: "too risky to change", "hard to validate", "we detect and correct it downstream", "the prompt now instructs it to", "out of scope for this fix", "we don't have that information", "that's decided by the model". ALWAYS load before writing "fixed" or "root cause" in any summary, commit or PR. Not for initial diagnosis (use systematic-debugging), nor for routine fixes that plainly remove the mechanism.
+description: Use when a defect's mechanism is known and the change you are about to ship may leave it intact — prompt/instruction tweaks, retries, warnings, post-hoc repair, fallbacks, guards downstream of the bad value — or when cost, risk, validation difficulty or scope is steering you toward a substitute. Fires on YOUR OWN reasoning, not just the user's words — "too risky to change", "hard to validate", "we detect and correct it downstream", "the prompt now instructs it to", "out of scope for this fix", "we don't have that information", "that's decided by the model". ALWAYS load before writing "fixed" or "root cause" in any summary, commit or PR. Not for initial diagnosis (use systematic-debugging), nor for routine fixes that plainly remove the mechanism.
 ---
 
 # Root Cause
