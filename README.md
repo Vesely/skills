@@ -50,6 +50,12 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/handoff-to-worktree
   ```
 
+- **pr-handoff** — Turn a branch into a reviewable GitHub PR, with annotated screenshots as the primary deliverable. Reads the diff, drives [`agent-browser`](https://www.npmjs.com/package/agent-browser) over every affected surface, outlines the changed elements in red, stitches the shots into an ImageMagick collage, self-reviews it until the annotations actually land, and writes the title + description with per-panel captions. Optional GIF screencast for multi-step flows. Never uploads to an anonymous image host: hosting goes through `share-file` (your own R2 bucket, 90-day expiry) or your own `PR_HANDOFF_UPLOAD_CMD`, and otherwise stays local for drag-and-drop.
+
+  ```
+  npx skills@latest add Vesely/skills/pr-handoff
+  ```
+
 ### Code quality
 
 - **root-cause** — Stops you shipping a patch and calling it a fix. Forces you to state the defect mechanism in one unhedged sentence, label what you are actually shipping (fix / mitigation / workaround), and refuse to let cost, risk or scope constraints quietly redefine the problem. Catches the two classic tells: the word "can't" (the thing you claim you cannot know *is* the root cause) and constraint laundering (your validation budget silently choosing the architecture). Complements `systematic-debugging`, which gets you *to* the root cause.
