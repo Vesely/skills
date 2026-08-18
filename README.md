@@ -100,6 +100,12 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/screencast
   ```
 
+- **gh-upload** — Put a screenshot, GIF or video straight into a GitHub PR or issue body from the terminal. `gh` has no command for this; this is the endpoint behind the web UI's drag-and-drop, so the asset **inherits the repo's visibility** — private repo, private asset — instead of living on a public host forever. Covers the traps: the repo id must be the numeric one (the GraphQL node id 404s), the allowlist is media-only (PDF, zip and logs are rejected), the filename's extension has to match the declared MIME type, `+` in `image/svg+xml` must be percent-encoded, and a video only gets a player when its URL sits bare on its own line.
+
+  ```
+  npx skills@latest add Vesely/skills/gh-upload
+  ```
+
 - **share-file** — Upload a screenshot, screencast, GIF, PDF or any artifact to your own Cloudflare R2 bucket and get back a public direct URL that expires on its own. Default retention 90 days, overridable per upload (`7d`, `30d`, `365d`, `keep`) — expiry is enforced by R2 lifecycle rules on TTL-named prefixes, so files clean themselves up. Sets the correct `Content-Type` so images and GIFs render inline in GitHub PRs instead of downloading. No API keys: auth is `wrangler login`, and the public host is discovered from your own bucket at runtime, so the skill works unchanged on any Cloudflare account. Run `share-file setup` once to create the bucket, lifecycle rules, and public access. Free at normal volume (R2 free tier: 10 GB stored, unlimited egress).
 
   ```
