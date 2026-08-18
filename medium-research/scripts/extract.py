@@ -52,19 +52,24 @@ def first_match(pattern: str, source: str, group: int = 1, flags=0) -> str | Non
 def parse_freedium(page: str) -> dict:
     """Parse a Freedium-rendered Medium article page.
 
-    Freedium structure (observed):
-        <h1 class="pt-6 ... font-bold ...">TITLE</h1>
-        <h2 class="pt-1 ... font-medium ...">SUBTITLE</h2>
-        <div class="mt-8 main-content">... ARTICLE BODY ...</div>
-        <title>TITLE | by AUTHOR - Freedium</title>
-        Plain text markers: "Free: Yes/No", "<Month> <D>, <YYYY>", "~N min read"
+    Freedium structure. The mirror was rewritten as a SvelteKit app around
+    2026-08, so both layouts are handled:
+        current: <h1 class="mb-4 text-4xl ...">TITLE</h1>
+                 <article class="...">... ARTICLE BODY ...</article>
+                 <title>TITLE - Freedium</title>
+                 plain text: "By AUTHOR", "<Month> <D>, <YYYY>", "N min read"
+        legacy:  <h1 class="pt-6 ...">TITLE</h1>, <h2 class="pt-1 ...">SUBTITLE</h2>,
+                 <div class="mt-8 main-content">BODY</div>,
+                 <title>TITLE | by AUTHOR - Freedium</title>, "Free: Yes/No"
+    The current UI emits no paywall marker at all, so `paywall` stays None there.
     """
     result: dict = {
         "title": None, "subtitle": None, "author": None, "date": None,
         "paywall": None, "read_min": None, "body": "", "word_count": 0,
     }
 
-    title_html = first_match(r'<h1[^>]*pt-6[^>]*>(.*?)</h1>', page, flags=re.S)
+    title_html = (first_match(r'<h1[^>]*pt-6[^>]*>(.*?)</h1>', page, flags=re.S)
+                  or first_match(r'<h1[^>]*>(.*?)</h1>', page, flags=re.S))
     if title_html:
         result["title"] = strip_html(title_html)
 
@@ -78,13 +83,19 @@ def parse_freedium(page: str) -> dict:
         if m:
             result["author"] = m.group(1).strip()
 
-    # Body: find the main-content div, then walk div depth to find its close.
-    main_open = re.search(r'<div[^>]*class="[^"]*main-content[^"]*"[^>]*>', page)
-    if main_open:
+    # Body: current mirror wraps it in <article>, the pre-SvelteKit one in a
+    # main-content div. Try both, walking tag depth to find the matching close.
+    for tag, open_pattern in (
+        ("article", r"<article[^>]*>"),
+        ("div", r'<div[^>]*class="[^"]*main-content[^"]*"[^>]*>'),
+    ):
+        container = re.search(open_pattern, page)
+        if not container:
+            continue
         depth = 1
-        start = main_open.end()
+        start = container.end()
         end_idx = start
-        for m in re.finditer(r"<(/?)div\b[^>]*>", page[start:]):
+        for m in re.finditer(rf"<(/?){tag}\b[^>]*>", page[start:]):
             if m.group(1) == "":
                 depth += 1
             else:
@@ -103,9 +114,13 @@ def parse_freedium(page: str) -> dict:
         body_html = re.sub(r"<br\s*/?>|</li>", "\n", body_html, flags=re.I)
         result["body"] = strip_html(body_html)
         result["word_count"] = len(result["body"].split())
+        if result["word_count"] >= 100:
+            break
 
     plain = strip_html(page)
-    if (m := re.search(r"~(\d+)\s*min read", plain)):
+    if not result["author"] and (m := re.search(r"\bBy\s+(.+?)\s+~?\d+\s*min read", plain)):
+        result["author"] = m.group(1).strip()
+    if (m := re.search(r"~?(\d+)\s*min read", plain)):
         result["read_min"] = int(m.group(1))
     if (m := re.search(
         r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}",
