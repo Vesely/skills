@@ -92,7 +92,19 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/token-burn
   ```
 
+- **park-workspace** — Free the RAM held by idle Claude sessions in cmux without closing the workspaces, so they stay visible as your TODO list. Parks a single workspace, a whole window, or a picked set — stopping the claude session plus its dev servers and test browsers — and resumes the exact session later with full history. Ships a curses picker (enter freezes/unfreezes a row, `f` focuses the workspace), marks parked rows in the native cmux sidebar, and pre-fills the resume command at the parked prompt so coming back is one keypress. The ledger lives outside cmux, so a corrupted cmux state can't lose the session; `doctor` and `rebuild` recover from one. Never parks a session mid-turn and never touches git worktrees. Triggers on "park this workspace", "park the window", "unpark", "what's parked", or complaining that idle cmux sessions eat RAM.
+
+  ```
+  npx skills@latest add Vesely/skills/park-workspace
+  ```
+
 ### Utilities
+
+- **ssh-gui** — Drive the graphical desktop of a remote macOS machine over plain ssh: no VNC, no screen sharing, no agent on the far side. Clicks, drags, keystrokes, menu navigation, window geometry and screenshots via cliclick, screencapture and the accessibility API. Gets the Retina coordinate model right (clicks are logical points, screenshots are native pixels, so shots are downscaled before you measure), batches commands into one round trip over a multiplexed connection, and ships a preflight that names which of the three macOS permissions is missing before you waste a click. For headless Macs: a mini in a cupboard, a build machine, a second Mac on the desk.
+
+  ```
+  npx skills@latest add Vesely/skills/ssh-gui
+  ```
 
 - **screencast** — Turn an agent-browser session into a polished product-demo video, fully local and free. Records the browser flow the agent drives, then composites an MP4 with auto zoom-to-click, an animated cursor + trail, click ripples, a keystroke overlay, idle trimming, chapters (lower-thirds + embedded MP4 chapters), and a gradient/rounded/shadowed frame. Screen-Studio-style output, produced by the agent. Requires agent-browser, ffmpeg, Node.
 
