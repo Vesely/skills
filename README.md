@@ -100,6 +100,12 @@ Or via [skills.sh](https://skills.sh).
 
 ### Utilities
 
+- **ssh-gui** — Drive the graphical desktop of a remote macOS machine over plain ssh: no VNC, no screen sharing, no agent on the far side. Clicks, drags, keystrokes, menu navigation, window geometry and screenshots via cliclick, screencapture and the accessibility API. Gets the Retina coordinate model right (clicks are logical points, screenshots are native pixels, so shots are downscaled before you measure), batches commands into one round trip over a multiplexed connection, and ships a preflight that names which of the three macOS permissions is missing before you waste a click. For headless Macs: a mini in a cupboard, a build machine, a second Mac on the desk.
+
+  ```
+  npx skills@latest add Vesely/skills/ssh-gui
+  ```
+
 - **screencast** — Turn an agent-browser session into a polished product-demo video, fully local and free. Records the browser flow the agent drives, then composites an MP4 with auto zoom-to-click, an animated cursor + trail, click ripples, a keystroke overlay, idle trimming, chapters (lower-thirds + embedded MP4 chapters), and a gradient/rounded/shadowed frame. Screen-Studio-style output, produced by the agent. Requires agent-browser, ffmpeg, Node.
 
   ```
