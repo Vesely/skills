@@ -112,6 +112,12 @@ LAUNCHERS = {"node", "npx", "bun", "deno", "python", "python3", "-m", "exec",
 # read as the program being run.
 VALUE_FLAGS = {"--package", "-p", "--loader", "--require", "-r", "-c",
                "-n", "-u"}
+# A shell wrapper runs something else, exactly as `env` does — but its `-c`
+# does NOT swallow a value the way node's and python's do: `ps` renders
+# `sh -c 'vite --port 3000'` unquoted, so the token after `-c` is the program.
+# Without reading through them, `bash -c 'git commit -m "npm run dev broke"'`
+# stopped at `bash`, missed NEVER_KILL, and matched the commit message.
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
 # `env FOO=1 git …`: an assignment is neither a flag nor the program.
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Never classify these as anything killable, whatever else the line contains.
@@ -489,10 +495,20 @@ def attribute(spaces, table=None):
         if not cwd:
             continue
         entry["cwd"] = cwd
-        for d, ws_id in dirs:
-            if d and (cwd == d or cwd.startswith(d + "/")):
-                by_ws.setdefault(ws_id, []).append(entry)
-                break
+        best = next((d for d, _ in dirs
+                     if d and (cwd == d or cwd.startswith(d + "/"))), None)
+        if best is None:
+            continue
+        owners = [ws_id for d, ws_id in dirs if d == best]
+        if len(owners) > 1:
+            # Two workspaces rooted at the SAME directory. A longer prefix
+            # beats a shorter one, but equal prefixes are indistinguishable,
+            # and this fallback is already a guess — picking one would attach
+            # a session to the wrong workspace and kill that workspace's tree
+            # on the next park. An unparkable workspace is recoverable; a
+            # killed session is not.
+            continue
+        by_ws.setdefault(owners[0], []).append(entry)
     return by_ws
 
 
@@ -678,7 +694,11 @@ def session_id_of(pid, cwd=None):
     d = project_dir(cwd)
 
     for path in lsof_field(pid):
-        m = re.search(r"/\.claude/projects/[^/]+/([0-9a-f-]{36})\.jsonl$", path)
+        # Case-insensitive like SESSION_ID_RE: cmux writes uppercase uuids in
+        # places, and a lowercase-only match here dropped through to the
+        # last-resort mtime scan, which can pick an OLD session.
+        m = re.search(r"/\.claude/projects/[^/]+/([0-9A-Fa-f-]{36})\.jsonl$",
+                      path)
         if m and Path(path).parent == d:
             return m.group(1), path, "lsof"
 
@@ -756,23 +776,58 @@ def runs_binary(cmd, names):
     way, and drops one script extension so `nuxi.mjs` reads as `nuxi` while
     `vite.config.ts` stays `vite.config`.
     """
-    skip_next = False
-    for tok in cmd.split():
+    for _, tok in command_walk(cmd):
+        base = tok.rsplit("/", 1)[-1]
+        stem = re.sub(r"\.(?:mjs|cjs|js|ts)$", "", base)
+        if base in names or stem in names:
+            return True
+    return False
+
+
+def command_walk(cmd):
+    """Yield (index, token) for each token in program position.
+
+    Reads through environment assignments, flags, interpreter launchers and
+    shell wrappers, and stops after the first token that is none of those —
+    that one IS the program being run. Shared by `runs_binary` and
+    `effective_cmd` so the two can never disagree about what a line runs.
+    """
+    skip_next = after_shell = False
+    for i, tok in enumerate(cmd.split()):
         if skip_next:
             skip_next = False
             continue
         if ENV_ASSIGNMENT_RE.match(tok):
             continue
+        base = tok.rsplit("/", 1)[-1]
+        if base in SHELLS:
+            after_shell = True
+            continue
+        if after_shell and tok == "-c":
+            after_shell = False          # the next token is the program
+            continue
         if tok.startswith("-") and tok not in LAUNCHERS:
             skip_next = tok in VALUE_FLAGS
             continue
-        base = tok.rsplit("/", 1)[-1]
-        stem = re.sub(r"\.(?:mjs|cjs|js|ts)$", "", base)
-        if base in names or stem in names:
-            return True
+        yield i, tok
         if base not in LAUNCHERS:
-            return False
-    return False
+            return
+
+
+def effective_cmd(cmd):
+    """The command line from the program actually being run onward.
+
+    So the multi-word phrases can be anchored at the command position instead
+    of matched anywhere in the line: `python worker.py npm run dev` runs
+    worker.py and must not be killed as a dev server. Empty when no program
+    token can be found, which reads as "not a dev server" — under-matching
+    leaves a server running, over-matching takes the user's work with it.
+    """
+    toks = cmd.split()
+    for i, tok in command_walk(cmd):
+        if tok.rsplit("/", 1)[-1] not in LAUNCHERS:
+            return " ".join(toks[i:])
+    return ""
 
 
 def kill_kind(cmd):
@@ -786,7 +841,9 @@ def kill_kind(cmd):
         return None  # the user's editor/pager/VCS is never a target
     if TEST_BROWSER_RE.search(cmd) or runs_binary(cmd, BROWSER_BINARIES):
         return "test-browser"
-    if DEV_SERVER_RE.search(cmd) or runs_binary(cmd, DEV_BINARIES):
+    # `.match` on the effective command, not `.search` on the whole line: the
+    # phrase has to BE the command, not appear among its arguments.
+    if DEV_SERVER_RE.match(effective_cmd(cmd)) or runs_binary(cmd, DEV_BINARIES):
         return "dev-server"
     return None
 
@@ -1793,7 +1850,8 @@ def park_one(w, by_ws, table, dry=False, force=False, brutal=False,
         return _park_one(w, by_ws, table, True, force, brutal, snaps)
     lock = acquire_op_lock(w["id"])
     if not lock:
-        return {"ref": w["ref"], "title": w.get("title") or "", "ok": False,
+        return {"id": w["id"], "ref": w["ref"],
+                "title": w.get("title") or "", "ok": False,
                 "freed": 0, "notes": [],
                 "msg": "another park or unpark is working on this workspace"}
     try:
@@ -1817,7 +1875,8 @@ def _park_one(w, by_ws, table, dry=False, force=False, brutal=False,
     running turn, and `cmd_park` makes the user type it out and confirm.
     """
     ref, title = w["ref"], (w["title"] or "")
-    res = {"ref": ref, "title": title, "ok": False, "freed": 0, "notes": []}
+    res = {"id": w["id"], "ref": ref, "title": title, "ok": False,
+           "freed": 0, "notes": []}
 
     if ledger_path(w["id"]).exists():
         res["msg"] = "already parked"
@@ -1958,22 +2017,25 @@ def _park_one(w, by_ws, table, dry=False, force=False, brutal=False,
     doomed = browser + dev + claude
     try:
         victims = [p for p in doomed if pid_matches(p)]
+        stale = len(doomed) - len(victims)
+        if stale:
+            res["notes"].append(f"{stale} process(es) vanished before the kill")
+        for p in victims:
+            kill_tree(p["pid"])
+        survivors = wait_gone(victims, 1.5)
+        for p in survivors:                 # escalate rather than report a lie
+            kill_tree(p["pid"], sig=signal.SIGKILL)
+        stubborn = wait_gone(survivors, 0.5) if survivors else []
     except BaseException:
-        # Ctrl-C between the claim and the kill would otherwise leave a complete
-        # ledger entry with the session still alive — which `doctor` calls
-        # restorable and `unpark` answers by starting a SECOND process on that
-        # transcript.
-        ledger_path(w["id"]).unlink(missing_ok=True)
+        # Ctrl-C ANYWHERE between the claim and the last kill — the two waits
+        # are most of the window — would otherwise leave a complete ledger
+        # entry with the session still alive, which `doctor` calls restorable
+        # and `unpark` answers by starting a SECOND process on that
+        # transcript. Roll back only while nothing is lost yet: once a session
+        # is dead, the entry is the only record of how to get it back.
+        if len(still_running(claude)) == len(claude):
+            ledger_path(w["id"]).unlink(missing_ok=True)
         raise
-    stale = len(doomed) - len(victims)
-    if stale:
-        res["notes"].append(f"{stale} process(es) vanished before the kill")
-    for p in victims:
-        kill_tree(p["pid"])
-    survivors = wait_gone(victims, 1.5)
-    for p in survivors:                     # escalate rather than report a lie
-        kill_tree(p["pid"], sig=signal.SIGKILL)
-    stubborn = wait_gone(survivors, 0.5) if survivors else []
     if stubborn and len(still_running(claude)) == len(claude):
         # Nothing irreplaceable is gone yet, so a clean rollback is the honest
         # answer: the ledger would otherwise claim parked while the session is
@@ -2461,7 +2523,11 @@ def hand_back_tab(results):
     if not mine or not here:
         return False
     entry = read_entry(ledger_path(here))
-    if not entry or not any(r["ok"] and not r["notes"] for r in results):
+    # This workspace's own result. `any` over the whole batch closed the tab
+    # on a sibling's success — taking this workspace's refusal with it, and
+    # every note park_targets was about to print.
+    ours = [r for r in results if r.get("id") == here]
+    if not entry or not any(r["ok"] and not r["notes"] for r in ours):
         return False
     for s in entry.get("sessions", []):
         # The tab the prefill was typed into: land the user on the command
@@ -3123,37 +3189,54 @@ def cmd_repaint(argv):
         return
 
     def repaint_one(item):
-        """-> (marked, typed, skipped, line to print or None)"""
+        """-> (marked, typed, skipped, lines to print)"""
         e, w = item
-        line = prompt_line(w["id"])
         title = (e.get("title") or "")[:34]
+        # Every parked tab, not just the workspace's default surface.
+        # `_park_one` prefills each session's own surface, so reading and
+        # retyping one surface brought a multi-tab workspace back with one
+        # prompt primed and the rest bare.
+        surfaces = [s.get("surface") or None
+                    for s in e.get("sessions", [])] or [None]
+        reads = [(sf, prompt_line(w["id"], sf)) for sf in surfaces]
         if dry:
-            state = ("prefill present" if line and line.endswith(PREFILL)
-                     else "would retype prefill" if bare_prompt(line)
+            state = ("prefill present"
+                     if all(line and line.endswith(PREFILL)
+                            for _, line in reads)
+                     else "would retype prefill"
+                     if any(bare_prompt(line) for _, line in reads)
                      else "prompt busy — pill/colour only")
-            return 1, 0, 0, (f"  would repaint  {w['ref']:<13} "
-                             f"{title:<36} {state}")
+            return 1, 0, 0, [f"  would repaint  {w['ref']:<13} "
+                             f"{title:<36} {state}"]
         ok = set_parked_pill(w["id"], e.get("freed_bytes") or 0)
         ok &= set_parked_color(w["id"])
-        if line and line.endswith(PREFILL):
-            return bool(ok), 0, 0, None    # already there, leave it alone
-        if not bare_prompt(line):
-            # Something is typed there, or the screen would not read. Either
-            # way it is not ours to append to.
-            return bool(ok), 0, 1, (f"  prompt busy    {w['ref']:<13} "
-                                    f"{title:<36} left the line alone")
-        return bool(ok), send_text(PREFILL, w["id"]), 0, None
+        typed = skipped = 0
+        for sf, line in reads:
+            if line and line.endswith(PREFILL):
+                continue                   # already there, leave it alone
+            if not bare_prompt(line):
+                # Something is typed there, or the screen would not read.
+                # Either way it is not ours to append to.
+                skipped += 1
+                continue
+            typed += send_text(PREFILL, w["id"], sf)
+        out = []
+        if skipped:
+            what = "the line" if skipped == 1 else f"{skipped} prompts"
+            out.append(f"  prompt busy    {w['ref']:<13} "
+                       f"{title:<36} left {what} alone")
+        return bool(ok), typed, skipped, out
 
     # Every entry is independent, and each one is a screen read plus two or
     # three cmux writes — around 600 ms of socket wait that used to be paid
     # one workspace at a time. Printed in ledger order however the threads
     # finish, the way park_targets prints in target order.
     marks = typed = skipped = 0
-    for marked, sent, skip, line in pmap(repaint_one, todo):
+    for marked, sent, skip, lines in pmap(repaint_one, todo):
         marks += marked
         typed += sent
         skipped += skip
-        if line:
+        for line in lines:
             print(line)
     if dry:
         print(f"\n  {marks} workspace(s) would be repainted\n")

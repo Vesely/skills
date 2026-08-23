@@ -123,9 +123,19 @@ def parse_freedium(page: str) -> dict:
         result["word_count"] = len(result["body"].split())
 
     plain = strip_html(page)
-    if not result["author"] and (m := re.search(r"\bBy\s+(.+?)\s+~?\d+\s*min read", plain)):
+    # strip_html collapses the page to one line, so an unbounded `(.+?)` here
+    # ran from the leftmost "By" in the site chrome — Freedium's own "Written
+    # By a Human Not By AI" banner — all the way to the sidebar's read time.
+    # A byline is one to four capitalised words directly before it.
+    if not result["author"] and (m := re.search(
+            r"\bBy\s+((?:[A-Z][\w.'’-]*)(?:\s+[A-Z][\w.'’-]*){0,3})"
+            r"\s+~?\d+\s*min read", plain)):
         result["author"] = m.group(1).strip()
-    if (m := re.search(r"~?(\d+)\s*min read", plain)):
+    # The legacy layout writes "~7 min read" and the current one "7 min read".
+    # Prefer the tilde when the page has one: it is unambiguous, where a bare
+    # number can also be some other element's.
+    if (m := re.search(r"~(\d+)\s*min read", plain)
+             or re.search(r"(\d+)\s*min read", plain)):
         result["read_min"] = int(m.group(1))
     if (m := re.search(
         r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}",

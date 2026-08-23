@@ -78,6 +78,30 @@ class TestWhoGetsKilled(unittest.TestCase):
         for cmd in ("env vite", "stdbuf -oL npm run dev", "nohup next dev"):
             self.assertEqual(park.kill_kind(cmd), "dev-server", cmd)
 
+    def test_a_phrase_among_the_arguments_is_not_the_command(self):
+        # The phrase has to BE the command. `python worker.py npm run dev`
+        # runs worker.py, and classifying it as a dev server handed an
+        # unrelated process tree to kill_tree.
+        for cmd in ("python worker.py npm run dev",
+                    "python3 /srv/queue.py --label npm run dev",
+                    "ruby bin/job.rb next dev"):
+            self.assertIsNone(park.kill_kind(cmd), cmd)
+
+    def test_shell_wrappers_are_read_through(self):
+        # `sh -c 'git commit …'` renders unquoted in ps, so the token after
+        # -c is the program. Stopping at the shell missed NEVER_KILL and then
+        # matched the phrase inside the commit message.
+        for cmd in ("bash -c git commit -m npm run dev is broken",
+                    "/bin/sh -c rg Chrome for Testing src/",
+                    "zsh -c vim vite.config.ts"):
+            self.assertIsNone(park.kill_kind(cmd), cmd)
+
+    def test_a_shell_wrapped_dev_server_is_still_a_dev_server(self):
+        for cmd in ("sh -c vite --port 3000",
+                    "/bin/sh -c next dev",
+                    "bash -c npm run dev"):
+            self.assertEqual(park.kill_kind(cmd), "dev-server", cmd)
+
     def test_is_claude_matches_the_program_not_the_path(self):
         self.assertTrue(park.is_claude("claude --resume abc"))
         self.assertTrue(park.is_claude("/opt/homebrew/bin/claude"))
@@ -114,6 +138,42 @@ class TestClassify(unittest.TestCase):
         table = {100: {"ppid": 200, "rss": 0, "cmd": "claude"},
                  200: {"ppid": 100, "rss": 0, "cmd": "claude"}}
         park.classify(procs, table)      # must terminate
+
+
+class TestAttributeFallback(unittest.TestCase):
+    """cwd attribution is a guess, and a wrong guess kills someone else's tree."""
+
+    TABLE = {42: {"ppid": 1, "rss": 100, "cmd": "claude --resume abc",
+                  "start": 0}}
+
+    def setUp(self):
+        for name, value in (("read_env", lambda pids: {}),
+                            ("proc_cwd", lambda pid: self.cwd)):
+            self.addCleanup(setattr, park, name, getattr(park, name))
+            setattr(park, name, value)
+        self.cwd = "/repo"
+
+    def spaces(self, *dirs):
+        return [{"id": f"ws-{i}", "ref": f"workspace:{i}", "title": "",
+                 "current_directory": d} for i, d in enumerate(dirs, 1)]
+
+    def test_one_workspace_owns_the_directory(self):
+        self.cwd = "/repo/sub"
+        by_ws = park.attribute(self.spaces("/repo"), self.TABLE)
+        self.assertEqual(list(by_ws), ["ws-1"])
+
+    def test_a_longer_prefix_still_wins(self):
+        self.cwd = "/repo/worktrees/x/pkg"
+        by_ws = park.attribute(self.spaces("/repo", "/repo/worktrees/x"),
+                               self.TABLE)
+        self.assertEqual(list(by_ws), ["ws-2"])
+
+    def test_two_workspaces_on_one_directory_own_nothing(self):
+        # Equal prefixes are indistinguishable. Picking one attached the
+        # session to the wrong workspace, and the next park killed its tree.
+        self.cwd = "/repo/sub"
+        by_ws = park.attribute(self.spaces("/repo", "/repo"), self.TABLE)
+        self.assertEqual(by_ws, {})
 
 
 class TestBusyVerdict(unittest.TestCase):
@@ -322,7 +382,8 @@ class TestHandBackTab(unittest.TestCase):
                           "sessions": [{"session_id": "s", "surface": self.AGENT}]})
 
     def ok(self, notes=()):
-        return [{"ok": True, "notes": list(notes), "ref": "workspace:1"}]
+        return [{"id": self.WS, "ok": True, "notes": list(notes),
+                 "ref": "workspace:1"}]
 
     def test_a_clean_park_focuses_the_agent_tab_then_closes_ours(self):
         self.parked()
@@ -334,7 +395,8 @@ class TestHandBackTab(unittest.TestCase):
     def test_a_refusal_leaves_the_tab_open(self):
         self.parked()
         self.assertFalse(park.hand_back_tab(
-            [{"ok": False, "notes": [], "ref": "workspace:1"}]))
+            [{"id": self.WS, "ok": False, "notes": [],
+              "ref": "workspace:1"}]))
         self.assertEqual(self.calls, [])
 
     def test_a_note_leaves_the_tab_open(self):
@@ -346,6 +408,17 @@ class TestHandBackTab(unittest.TestCase):
 
     def test_it_does_nothing_when_this_workspace_was_not_the_one_parked(self):
         self.assertFalse(park.hand_back_tab(self.ok()))
+        self.assertEqual(self.calls, [])
+
+    def test_a_siblings_success_does_not_close_this_tab(self):
+        # `park park window:2` from a tab whose own workspace refused: `any`
+        # over the whole batch closed the tab on the sibling's success, taking
+        # this workspace's refusal and every note with it.
+        self.parked()
+        self.assertFalse(park.hand_back_tab([
+            {"id": self.WS, "ok": False, "notes": [], "ref": "workspace:1"},
+            {"id": "ws-two", "ok": True, "notes": [], "ref": "workspace:2"},
+        ]))
         self.assertEqual(self.calls, [])
 
     def test_it_does_nothing_outside_a_cmux_pane(self):
