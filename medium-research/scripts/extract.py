@@ -22,6 +22,7 @@ UA = "Mozilla/5.0 (compatible; medium-research/1.0)"
 MIRROR = "https://freedium-mirror.cfd"
 TIMEOUT = 30
 MIN_HTML_BYTES = 5000  # Freedium error pages are ~2KB; real articles >>5KB
+MIN_BODY_WORDS = 100   # below this the container matched chrome, not prose
 
 
 def http_get(url: str, timeout: int = TIMEOUT) -> str | None:
@@ -84,7 +85,10 @@ def parse_freedium(page: str) -> dict:
             result["author"] = m.group(1).strip()
 
     # Body: current mirror wraps it in <article>, the pre-SvelteKit one in a
-    # main-content div. Try both, walking tag depth to find the matching close.
+    # main-content div. A transitional page carries both — one of them a shell
+    # — so collect whatever each yields and keep the longer, rather than
+    # letting whichever is tried last overwrite the other.
+    candidates = []
     for tag, open_pattern in (
         ("article", r"<article[^>]*>"),
         ("div", r'<div[^>]*class="[^"]*main-content[^"]*"[^>]*>'),
@@ -94,7 +98,7 @@ def parse_freedium(page: str) -> dict:
             continue
         depth = 1
         start = container.end()
-        end_idx = start
+        end_idx = start          # never closed: take nothing, not the whole page
         for m in re.finditer(rf"<(/?){tag}\b[^>]*>", page[start:]):
             if m.group(1) == "":
                 depth += 1
@@ -103,7 +107,10 @@ def parse_freedium(page: str) -> dict:
                 if depth == 0:
                     end_idx = start + m.start()
                     break
-        body_html = page[start:end_idx]
+        candidates.append(page[start:end_idx])
+
+    body_html = max(candidates, key=len, default="")
+    if body_html:
         # Insert newlines for block elements before the final tag-strip flattens
         # everything into a single line. Order matters: do <pre> first so its
         # contents survive the later tag strip.
@@ -114,8 +121,6 @@ def parse_freedium(page: str) -> dict:
         body_html = re.sub(r"<br\s*/?>|</li>", "\n", body_html, flags=re.I)
         result["body"] = strip_html(body_html)
         result["word_count"] = len(result["body"].split())
-        if result["word_count"] >= 100:
-            break
 
     plain = strip_html(page)
     if not result["author"] and (m := re.search(r"\bBy\s+(.+?)\s+~?\d+\s*min read", plain)):
@@ -177,7 +182,7 @@ def main():
     parsed["url"] = medium_url
     parsed["extraction_failed"] = False
 
-    if not parsed["body"] or parsed["word_count"] < 100:
+    if not parsed["body"] or parsed["word_count"] < MIN_BODY_WORDS:
         parsed["extraction_failed"] = True
         parsed["reason"] = "body_extraction_failed_or_short"
 

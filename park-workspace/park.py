@@ -65,9 +65,6 @@ LOCK_STALE_SECONDS = 60.0
 # and a wait for the session to come up — so it gets a much longer rope. It is
 # normally released by its owner dying, not by this timeout.
 OP_LOCK_STALE_SECONDS = 300.0
-# How stale cmd_park lets its process snapshot get before re-taking it, so a
-# session started during a long batch cannot be missed by classify().
-SNAPSHOT_MAX_AGE = 5.0
 # How many workspaces a batch parks at once. Each one is almost entirely
 # waiting — cmux round-trips, a CPU window, git — and they share one snapshot
 # per wave, so the wave size is also how fresh that snapshot stays.
@@ -444,7 +441,7 @@ def read_env(pids):
     return out
 
 
-def attribute(spaces):
+def attribute(spaces, table=None):
     """Map each workspace UUID to the processes it owns.
 
     Primary key is the inherited CMUX_WORKSPACE_ID (exact). Processes that lost
@@ -458,7 +455,7 @@ def attribute(spaces):
     after it — and this map is what decides which processes get SIGKILLed. A
     uuid cannot slide onto a different workspace.
     """
-    table = ps_table()
+    table = table if table is not None else ps_table()
     known = {w["id"] for w in spaces}
 
     interesting = {
@@ -467,11 +464,13 @@ def attribute(spaces):
     }
     envs = read_env(interesting.keys())
 
+    # Longest prefix first, so /repo cannot swallow a nested worktree. Equal
+    # lengths fall back to (path, id): two workspaces sharing one directory
+    # must resolve the same way on every run, not in dict order.
     dirs = sorted(
-        ((w.get("current_directory") or "").rstrip("/"), w["id"])
-        for w in spaces if w.get("current_directory")
-    )
-    dirs.sort(key=lambda t: -len(t[0]))
+        (((w.get("current_directory") or "").rstrip("/"), w["id"])
+         for w in spaces if w.get("current_directory")),
+        key=lambda t: (-len(t[0]), t))
 
     by_ws, unmapped = {}, []
     for pid, info in interesting.items():
@@ -701,6 +700,23 @@ def session_id_of(pid, cwd=None):
     return best[0].stem, str(best[0]), "scan"
 
 
+def ps_pairs(field, cast=str):
+    """pid -> one ps column. The single-column sweeps all parse the same way;
+    only the column and the cast differ. (`ps_table` stays separate: five
+    columns with a command line that can contain spaces.)"""
+    r = subprocess.run(["ps", "-Ao", f"pid=,{field}="], capture_output=True,
+                       text=True)
+    out = {}
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            try:
+                out[int(parts[0])] = cast(parts[1])
+            except ValueError:
+                pass
+    return out
+
+
 def cpu_snapshots(seconds=2.0):
     """Two system-wide %CPU readings, `seconds` apart.
 
@@ -709,17 +725,7 @@ def cpu_snapshots(seconds=2.0):
     one — a ten-target park used to pay for ten separate 2 s waits.
     """
     def snap():
-        r = subprocess.run(["ps", "-Ao", "pid=,%cpu="], capture_output=True,
-                           text=True)
-        d = {}
-        for line in r.stdout.splitlines():
-            parts = line.split()
-            if len(parts) == 2:
-                try:
-                    d[int(parts[0])] = float(parts[1])
-                except ValueError:
-                    pass
-        return d
+        return ps_pairs("%cpu", float)
     a = snap()
     time.sleep(seconds)
     b = snap()
@@ -910,17 +916,13 @@ def still_running(procs):
 
     One `ps` sweep answers both: absent is gone, `Z` is a corpse waiting to be
     reaped, anything else is really running.
+
+    System-wide rather than `ps -p <the pids>` on purpose, and measured: on
+    macOS `ps -p` with more than one pid costs a flat ~140 ms (2 pids and 128
+    pids alike) while the whole table is ~15 ms. Narrowing this to the pids we
+    care about makes it ten times slower.
     """
-    r = subprocess.run(["ps", "-Ao", "pid=,state="], capture_output=True,
-                       text=True)
-    states = {}
-    for line in r.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 2:
-            try:
-                states[int(parts[0])] = parts[1]
-            except ValueError:
-                pass
+    states = ps_pairs("state")
     return [p for p in procs
             if not states.get(p["pid"], "Z").startswith("Z")]
 
@@ -1348,8 +1350,8 @@ def collect(spaces=None):
     """One pass over every workspace -> rows ready for display or JSON."""
     spaces = spaces if spaces is not None else all_workspaces()
     parked = {p["workspace_id"]: p for p in read_ledger()}
-    by_ws = attribute(spaces)
     table = ps_table()
+    by_ws = attribute(spaces, table)
 
     # Narrow to rows we will actually show BEFORE the expensive per-workspace
     # lookups: status is a ~256 ms cmux round-trip and git is a subprocess.
@@ -1487,19 +1489,25 @@ def ago(iso):
     `latest_submitted_at` (`...Z`) for a live one, and Python 3.9's
     fromisoformat rejects the Z form outright.
     """
-    if not isinstance(iso, str) or not iso:
+    return ago_seconds(seconds_since(iso))
+
+
+def ago_seconds(secs):
+    """Humanise an age already measured in seconds; '?' for the inf and the
+    junk inputs `seconds_since` folds into it."""
+    if secs == float("inf"):
         return "?"
-    try:
-        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return "?"
-    if t.tzinfo is None:
-        t = t.replace(tzinfo=timezone.utc)
-    d = datetime.now(timezone.utc) - t
-    if d.days:
-        return f"{d.days}d ago"
-    h = d.seconds // 3600
-    return f"{h}h ago" if h else f"{d.seconds // 60}m ago"
+    days = int(secs // 86400)
+    if days:
+        return f"{days}d ago"
+    h = int(secs // 3600)
+    return f"{h}h ago" if h else f"{int(secs // 60)}m ago"
+
+
+def ago_epoch(unix):
+    """Same, from a unix timestamp — cmux's shutdown times arrive as one, and
+    formatting them used to mean printing an ISO string only to re-parse it."""
+    return ago_seconds(datetime.now(timezone.utc).timestamp() - unix)
 
 
 def worktree_fingerprint(cwd):
@@ -1676,6 +1684,17 @@ def unsent_input(ws_id, surface=None):
     return ""
 
 
+def sid_key(sid):
+    """Comparison key for a session id.
+
+    cmux writes uppercase uuids in some places and lowercase in others, so
+    anything that COMPARES two ids goes through here. What gets stored stays
+    verbatim: `resume_command_for` hands the id to `claude --resume`, where it
+    has to match what claude itself wrote.
+    """
+    return str(sid or "").lower()
+
+
 def live_session_ids(table=None, unresolved=None):
     """Session ids of every claude process running right now.
 
@@ -1710,7 +1729,7 @@ def live_session_ids(table=None, unresolved=None):
         if not sid:
             sid, _, _ = session_id_of(pid, proc_cwd(pid))
         if sid:
-            ids.add(sid.lower())
+            ids.add(sid_key(sid))
         elif unresolved is not None:
             unresolved.append(pid)
     return ids
@@ -1991,15 +2010,12 @@ def _park_one(w, by_ws, table, dry=False, force=False, brutal=False,
     # live one, so each failure is reported rather than assumed away.
     jobs = {
         "worktree": lambda: worktree_fingerprint(cwd),
-        "prefill": lambda: all(send_text(PREFILL, w["id"], s.get("surface"))
-                               for s in sessions),
-        "pill": lambda: cmux_do("set-status", PILL_KEY,
-                                f"Parked · {human(freed)} freed",
-                                "--icon", "snowflake", "--color", "#5AC8FA",
-                                "--priority", "90", "--workspace", w["id"]),
-        "colour": lambda: cmux_do("workspace-action", "--action", "set-color",
-                                  "--color", PARKED_COLOR,
-                                  "--workspace", w["id"]),
+        # A list, not a generator: `all` short-circuits, and one failed send
+        # used to mean every later tab was never typed into at all.
+        "prefill": lambda: all([send_text(PREFILL, w["id"], s.get("surface"))
+                                for s in sessions]),
+        "pill": lambda: set_parked_pill(w["id"], freed),
+        "colour": lambda: set_parked_color(w["id"]),
         "title": lambda: pin_title(w, title),
     }
     names = list(jobs)
@@ -2023,6 +2039,23 @@ def _park_one(w, by_ws, table, dry=False, force=False, brutal=False,
     res["ok"] = True
     res["msg"] = f"{human(freed)} freed"
     return res
+
+
+def set_parked_pill(ws_id, freed):
+    """The sidebar pill announcing a parked workspace. -> ok
+
+    Kept apart from the colour so `_park_one` can still say which of the two
+    cmux refused; together they are the mirror of `restore_visual_state`.
+    """
+    return cmux_do("set-status", PILL_KEY, f"Parked · {human(freed)} freed",
+                   "--icon", "snowflake", "--color", "#5AC8FA",
+                   "--priority", "90", "--workspace", ws_id)
+
+
+def set_parked_color(ws_id):
+    """The dimmed colour that goes with the pill. -> ok"""
+    return cmux_do("workspace-action", "--action", "set-color",
+                   "--color", PARKED_COLOR, "--workspace", ws_id)
 
 
 def restore_visual_state(ws_id, entry):
@@ -2157,7 +2190,7 @@ def wait_for_sessions(ids, timeout=8.0, step=0.4):
     so this is a `ps` sweep with no lsof behind it, and it returns the moment
     everything is up.
     """
-    want = {str(i).lower() for i in ids}
+    want = {sid_key(i) for i in ids}
     seen = set()
     deadline = time.time() + timeout
     while True:
@@ -2166,8 +2199,8 @@ def wait_for_sessions(ids, timeout=8.0, step=0.4):
             if not is_claude(cmd):
                 continue
             sid = argv_session_id(cmd)
-            if sid and sid.lower() in want:
-                seen.add(sid.lower())
+            if sid and sid_key(sid) in want:
+                seen.add(sid_key(sid))
         if not want - seen or time.time() >= deadline:
             return seen
         time.sleep(step)
@@ -2242,7 +2275,7 @@ def _unpark_one(w, allow_exec=False, live_ids=None):
     # Lowercased on both sides: `live_session_ids` normalises, and a ledger
     # entry records whatever spelling its source used.
     dupes = [s["session_id"] for s in e["sessions"]
-             if str(s.get("session_id") or "").lower() in running]
+             if sid_key(s.get("session_id")) in running]
     if dupes and len(dupes) == len(e["sessions"]):
         # Every session is back, so the workspace is not parked any more —
         # whatever resumed it, the ledger and the sidebar are now lying. Skip
@@ -2341,7 +2374,7 @@ def _unpark_one(w, allow_exec=False, live_ids=None):
     unconfirmed = set()
     if done:
         up = wait_for_sessions(done)
-        unconfirmed = {sid for sid in done if str(sid).lower() not in up}
+        unconfirmed = {sid for sid in done if sid_key(sid) not in up}
         if unconfirmed:
             res["notes"].append(
                 f"{len(unconfirmed)} tab(s) were sent their resume command but "
@@ -2439,6 +2472,23 @@ def hand_back_tab(results):
     return cmux_do("close-surface", "--surface", mine, "--workspace", here)
 
 
+def target_lines(targets, limit=None):
+    """The ref + title lines both confirmations print before asking."""
+    for w in targets[:limit] if limit else targets:
+        print(f"    {w['ref']:<13} {(w.get('title') or '')[:50]}")
+    if limit and len(targets) > limit:
+        print(f"    … and {len(targets) - limit} more")
+
+
+def typed_yes():
+    """Ask for the literal word. Anything else — a typo, ^C, a closed stdin —
+    is a no, because both callers are about to kill something."""
+    try:
+        return input("\n  type 'yes' to go ahead: ").strip() == "yes"
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def confirm_kill_anyway(targets):
     """Make the one flag that can lose a running turn a deliberate act.
 
@@ -2451,13 +2501,8 @@ def confirm_kill_anyway(targets):
         die("--kill-anyway needs a terminal to confirm at")
     print("\n  --kill-anyway ignores unsent drafts AND turns in flight.")
     print("  Anything still working below loses the turn:\n")
-    for w in targets:
-        print(f"    {w['ref']:<13} {(w.get('title') or '')[:50]}")
-    try:
-        answer = input("\n  type 'yes' to go ahead: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        answer = ""
-    if answer != "yes":
+    target_lines(targets)
+    if not typed_yes():
         die("aborted")
 
 
@@ -2479,29 +2524,28 @@ def cmd_park(argv):
     # target that is most of the wait. After a confirmation prompt instead,
     # where it would otherwise go stale while the user reads.
     pending = None
-    if True:
-        if bulk or idle:
-            if [a for a in argv if not a.startswith("--")]:
-                die("--all and --idle choose the targets themselves — "
-                    "do not name any")
-            targets, spaces = bulk_targets(idle)
-            if not targets:
-                print("  nothing matches\n")
-                return 0
-            if not dry and not confirm_bulk(targets, idle):
-                return 1
-        else:
-            pending = background(cpu_snapshots)
-            with Spinner("looking at the workspaces…"):
-                spaces = workspaces_for_park()
-            targets = targets_from(
-                argv,
-                "no target — pass a workspace ref, a title, `window:N`, or `.`",
-                spaces=spaces)
-            if brutal:
-                confirm_kill_anyway(targets)
-        return park_targets(targets, spaces, pending,
-                            dry, force, brutal, close_tab)
+    if bulk or idle is not None:
+        if [a for a in argv if not a.startswith("--")]:
+            die("--all and --idle choose the targets themselves — "
+                "do not name any")
+        targets, spaces = bulk_targets(idle)
+        if not targets:
+            print("  nothing matches\n")
+            return 0
+        if not dry and not confirm_bulk(targets, idle):
+            return 1
+    else:
+        pending = background(cpu_snapshots)
+        with Spinner("looking at the workspaces…"):
+            spaces = workspaces_for_park()
+        targets = targets_from(
+            argv,
+            "no target — pass a workspace ref, a title, `window:N`, or `.`",
+            spaces=spaces)
+        if brutal:
+            confirm_kill_anyway(targets)
+    return park_targets(targets, spaces, pending,
+                        dry, force, brutal, close_tab)
 
 
 def park_targets(targets, spaces, pending, dry, force, brutal,
@@ -2519,7 +2563,8 @@ def park_targets(targets, spaces, pending, dry, force, brutal,
         if pending is None:              # every wave gets its own reading
             pending = background(cpu_snapshots)
         with Spinner("checking what is safe to park…"):
-            by_ws, table = attribute(spaces), ps_table()
+            table = ps_table()
+            by_ws = attribute(spaces, table)
         snaps, pending = pending, None
         results = pmap(
             lambda w: park_one(w, by_ws, table, dry=dry, force=force,
@@ -2601,20 +2646,13 @@ def confirm_bulk(targets, idle):
     print(f"\n  About to park {len(targets)} workspace(s)"
           + (f", idle for {human_duration(idle)} or more" if idle else "")
           + ":\n")
-    for w in targets[:20]:
-        print(f"    {w['ref']:<13} {(w.get('title') or '')[:50]}")
-    if len(targets) > 20:
-        print(f"    … and {len(targets) - 20} more")
+    target_lines(targets, 20)
     print("\n  Dev servers and test browsers in them stop too, and unpark does "
           "not bring those back.")
     if not sys.stdin.isatty():
         die("--all/--idle needs a terminal to confirm at — "
             "use --dry-run to see the list")
-    try:
-        answer = input("\n  type 'yes' to go ahead: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        answer = ""
-    if answer != "yes":
+    if not typed_yes():
         print("  aborted\n")
         return False
     return True
@@ -2677,7 +2715,7 @@ def unpark_batch(targets, live_ids):
     claimed, dispatch, refused = set(live_ids), [], {}
     for w in targets:
         e = read_entry(ledger_path(w["id"]))
-        ids = {str(s.get("session_id") or "").lower()
+        ids = {sid_key(s.get("session_id"))
                for s in (e or {}).get("sessions", [])}
         clash = ids & claimed
         if clash:
@@ -2752,11 +2790,18 @@ def cmd_doctor(argv):
     if not entries:
         print("  no parked workspaces")
         return 0
+    # Nothing here feeds anything else, and each is either cmux round trips
+    # or a ps+lsof sweep, so start them together rather than in a queue.
+    pending_running = background(live_session_ids)
+    pending_closed = background(closed_workspaces)
     spaces = {w["id"]: w for w in all_workspaces()}
-    running = live_session_ids()
-    closed = closed_workspaces()
+    running, closed = pending_running(), pending_closed()
+    # One `git rev-parse` per entry, previously fired from inside the print
+    # loop — a third of doctor's runtime spent waiting on them one at a time.
+    prints = pmap(lambda e: worktree_fingerprint(e.get("cwd"))
+                  if e.get("worktree") else None, entries)
     bad = 0
-    for e in entries:
+    for e, worktree_now in zip(entries, prints):
         if e.get("__broken__"):
             bad += 1
             print(f"  ✗ {'-':<13} {Path(e['__broken__']).name[:38]:<40}"
@@ -2770,7 +2815,7 @@ def cmd_doctor(argv):
                 issues.append("session cwd missing")
             if not s.get("transcript") or not Path(s["transcript"]).exists():
                 issues.append("transcript missing")
-            if s.get("session_id") in running:
+            if sid_key(s.get("session_id")) in running:
                 issues.append("stale entry: session is already running "
                               "(clear with: park forget)")
             if s.get("id_source") == "scan":
@@ -2778,7 +2823,7 @@ def cmd_doctor(argv):
                               "verify the conversation after unpark")
         # The risk park guards against materialises WHILE parked, over days,
         # not during the moment park_one compares across.
-        if e.get("worktree") and worktree_fingerprint(e.get("cwd")) != e["worktree"]:
+        if e.get("worktree") and worktree_now != e["worktree"]:
             issues.append("git checkout changed since parking")
         live = spaces.get(e.get("workspace_id"))
         if not live:
@@ -2787,8 +2832,7 @@ def cmd_doctor(argv):
             if shut:
                 issues.append(
                     "workspace was closed "
-                    + ago(datetime.fromtimestamp(shut, timezone.utc)
-                          .isoformat())
+                    + ago_epoch(shut)
                     + " — not lost; drop the entry with: park forget")
             else:
                 # rekey first: after a reset the workspace is usually still
@@ -2837,7 +2881,7 @@ def cmd_rebuild(argv):
         for e in lost:
             shut = closed.get(e.get("workspace_id"))
             if shut:
-                when = ago(datetime.fromtimestamp(shut, timezone.utc).isoformat())
+                when = ago_epoch(shut)
                 print(f"  skip  {(e.get('title') or '')[:40]:<42} closed {when}"
                       " — `park forget` to drop it, `--closed` to rebuild anyway")
             else:
@@ -2988,14 +3032,14 @@ def cmd_rekey(argv):
         unavailable = {e["workspace_id"] for e in entries
                        if e.get("workspace_id") in live_by_id}
         if orphans:
-            by_ws, table = attribute(spaces), ps_table()
+            table = ps_table()
+            by_ws = attribute(spaces, table)
             for w in spaces:
                 if classify(by_ws.get(w["id"], []), table)[0]:
                     unavailable.add(w["id"])
 
     for e in shut:
-        when = ago(datetime.fromtimestamp(closed[e["workspace_id"]],
-                                          timezone.utc).isoformat())
+        when = ago_epoch(closed[e["workspace_id"]])
         print(f"  skip     {(e.get('title') or '')[:44]:<46} workspace was "
               f"closed {when} — drop it with `park forget`")
 
@@ -3004,7 +3048,7 @@ def cmd_rekey(argv):
               "workspace\n")
         return 1 if shut else 0
 
-    done, stuck = 0, 0
+    done, stuck, repaint = 0, 0, []
     for e in orphans:
         title = e.get("title") or ""
         new, note, why = rekey_match(e, spaces, unavailable)
@@ -3032,17 +3076,19 @@ def cmd_rekey(argv):
         ledger_path(old_id).unlink(missing_ok=True)
         unavailable.add(new["id"])
         # The reset wiped the pill and the colour with everything else, so the
-        # workspace is sitting there parked and looking live. Put them back.
-        cmux_do("set-status", PILL_KEY,
-                f"Parked · {human(e.get('freed_bytes') or 0)} freed",
-                "--icon", "snowflake", "--color", "#5AC8FA", "--priority", "90",
-                "--workspace", new["id"])
-        cmux_do("workspace-action", "--action", "set-color", "--color",
-                PARKED_COLOR, "--workspace", new["id"])
+        # workspace is sitting there parked and looking live. Put them back —
+        # after the loop, together: re-keying must stay serial because each
+        # match feeds `unavailable`, but painting affects nothing downstream.
+        repaint.append((new["id"], e.get("freed_bytes") or 0))
         done += 1
         print(f"  re-keyed  {title[:44]:<46} → {new['ref']}")
         if note:
             print(f"            {note}")
+
+    if repaint:
+        # A tuple, not `and`: a refused pill must not skip the colour.
+        pmap(lambda t: (set_parked_pill(t[0], t[1]), set_parked_color(t[0])),
+             repaint)
 
     verb = "would re-key" if dry else "re-keyed"
     print(f"\n  {verb} {done}, {stuck} left for `park rebuild`")
@@ -3076,34 +3122,39 @@ def cmd_repaint(argv):
         print("  nothing parked in an open workspace\n")
         return
 
-    marks = typed = skipped = 0
-    for e, w in todo:
+    def repaint_one(item):
+        """-> (marked, typed, skipped, line to print or None)"""
+        e, w = item
         line = prompt_line(w["id"])
+        title = (e.get("title") or "")[:34]
         if dry:
             state = ("prefill present" if line and line.endswith(PREFILL)
                      else "would retype prefill" if bare_prompt(line)
                      else "prompt busy — pill/colour only")
-            print(f"  would repaint  {w['ref']:<13} "
-                  f"{(e.get('title') or '')[:34]:<36} {state}")
-            marks += 1
-            continue
-        ok = cmux_do("set-status", PILL_KEY,
-                     f"Parked · {human(e.get('freed_bytes') or 0)} freed",
-                     "--icon", "snowflake", "--color", "#5AC8FA",
-                     "--priority", "90", "--workspace", w["id"])
-        ok &= cmux_do("workspace-action", "--action", "set-color",
-                      "--color", PARKED_COLOR, "--workspace", w["id"])
-        marks += bool(ok)
+            return 1, 0, 0, (f"  would repaint  {w['ref']:<13} "
+                             f"{title:<36} {state}")
+        ok = set_parked_pill(w["id"], e.get("freed_bytes") or 0)
+        ok &= set_parked_color(w["id"])
         if line and line.endswith(PREFILL):
-            continue                       # already there, leave it alone
+            return bool(ok), 0, 0, None    # already there, leave it alone
         if not bare_prompt(line):
             # Something is typed there, or the screen would not read. Either
             # way it is not ours to append to.
-            skipped += 1
-            print(f"  prompt busy    {w['ref']:<13} "
-                  f"{(e.get('title') or '')[:34]:<36} left the line alone")
-            continue
-        typed += send_text(PREFILL, w["id"])
+            return bool(ok), 0, 1, (f"  prompt busy    {w['ref']:<13} "
+                                    f"{title:<36} left the line alone")
+        return bool(ok), send_text(PREFILL, w["id"]), 0, None
+
+    # Every entry is independent, and each one is a screen read plus two or
+    # three cmux writes — around 600 ms of socket wait that used to be paid
+    # one workspace at a time. Printed in ledger order however the threads
+    # finish, the way park_targets prints in target order.
+    marks = typed = skipped = 0
+    for marked, sent, skip, line in pmap(repaint_one, todo):
+        marks += marked
+        typed += sent
+        skipped += skip
+        if line:
+            print(line)
     if dry:
         print(f"\n  {marks} workspace(s) would be repainted\n")
         return
@@ -3317,8 +3368,9 @@ def _picker(stdscr, rows, ws_by_ref, reload):
             else:
                 # attribute() needs EVERY workspace: longest-prefix matching
                 # is what stops /repo claiming a nested worktree's processes.
-                res = park_one(ws, attribute(list(ws_by_ref.values())),
-                               ps_table())
+                table = ps_table()
+                res = park_one(ws, attribute(list(ws_by_ref.values()), table),
+                               table)
         except (Exception, SystemExit) as ex:   # never kill or wedge the UI
             res = {"ok": False, "msg": str(ex)[:60] or "failed"}
         with lock:

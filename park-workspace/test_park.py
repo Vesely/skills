@@ -913,51 +913,46 @@ class TestPromptGuards(unittest.TestCase):
 
     BOX = "─" * 40
 
+    def setUp(self):
+        # Save the one attribute these tests replace. This used to reload the
+        # whole module per test, which rebound every module-level name in park
+        # — LEDGER included — to undo a single assignment.
+        real = park.read_screen
+        self.addCleanup(setattr, park, "read_screen", real)
+
     def screen(self, lines):
         return lambda ws, surface=None: lines
 
     def test_a_fenced_draft_is_found(self):
         park.read_screen = self.screen([self.BOX, "> half a thought"])
-        self.addCleanup(self.restore)
         self.assertEqual(park.unsent_input("ws"), "half a thought")
 
     def test_an_empty_input_box_is_not_a_draft(self):
         park.read_screen = self.screen([self.BOX, ">"])
-        self.addCleanup(self.restore)
         self.assertEqual(park.unsent_input("ws"), "")
 
     def test_a_shell_prompt_is_not_a_draft(self):
         park.read_screen = self.screen(["~/Sites/foo ❯ ls -la"])
-        self.addCleanup(self.restore)
         self.assertEqual(park.unsent_input("ws"), "")
 
     def test_an_unreadable_screen_is_not_no_draft(self):
         park.read_screen = lambda ws, surface=None: None
-        self.addCleanup(self.restore)
         self.assertIsNone(park.unsent_input("ws"))
 
     def test_draft_guard_refuses_a_draft_in_any_tab(self):
         park.read_screen = self.screen([self.BOX, "> wait"])
-        self.addCleanup(self.restore)
         why = park.draft_guard("ws", [proc(1, "claude", surface="s1"),
                                       proc(2, "claude", surface="s2")])
         self.assertIn("unsent text", why)
 
     def test_draft_guard_refuses_a_screen_it_cannot_read(self):
         park.read_screen = lambda ws, surface=None: None
-        self.addCleanup(self.restore)
         self.assertIn("cannot read",
                       park.draft_guard("ws", [proc(1, "claude")]))
 
     def test_draft_guard_passes_a_clean_prompt(self):
         park.read_screen = self.screen(["~/Sites/foo ❯ "])
-        self.addCleanup(self.restore)
         self.assertIsNone(park.draft_guard("ws", [proc(1, "claude")]))
-
-    def restore(self):
-        import importlib
-        importlib.reload(park)
-
 
 class TestClearPrefill(unittest.TestCase):
     def setUp(self):
