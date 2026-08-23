@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# ssh-gui - drive the GUI of a remote macOS machine over ssh.
+#
+# Every subcommand is exactly one ssh round trip. Connections are multiplexed
+# through a ControlMaster socket, so the second and later calls skip the
+# handshake. See SKILL.md for the coordinate model and the TCC failure modes.
+#
+# Usage: ssh-gui <host> <command> [args]
+#        SSH_GUI_HOST=<host> ssh-gui <command> [args]
+
+set -euo pipefail
+
+if [ -n "${SSH_GUI_HOST:-}" ]; then
+  HOST="$SSH_GUI_HOST"
+else
+  HOST="${1:-}"
+  shift || true
+fi
+CMD="${1:-}"
+shift || true
+
+if [ -z "$HOST" ] || [ -z "$CMD" ]; then
+  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+  exit 2
+fi
+
+# ControlPath lives in a sockaddr_un, which caps the whole path at 104 bytes.
+# Keep it short and out of any deep scratch directory.
+SOCK="/tmp/.sshgui-$(id -u)-${HOST//[^A-Za-z0-9]/_}"
+SSH_OPTS=(-o ControlMaster=auto -o ControlPath="$SOCK" -o ControlPersist=600
+          -o ConnectTimeout=10 -o BatchMode=yes)
+
+rsh() { ssh "${SSH_OPTS[@]}" "$HOST" "$@"; }
+
+# Remote scratch paths, namespaced the way SOCK already is. Two agents driving
+# the same Mac used to write the same /tmp/sshgui-*.png, so one `cat` returned
+# the other's frame and the agent measured coordinates on the wrong screen.
+# RPFX persists (the scale cache is worth keeping for an hour); RRUN is
+# per-invocation, and every writer rm -f's first so a planted symlink cannot
+# redirect screencapture.
+RPFX="/tmp/sshgui-$(id -u)"
+RRUN="$RPFX-$$"
+
+# AppleScript string-literal escaping. A name carrying a double quote — a menu
+# item like Open "Recent" — otherwise closes the literal and the script dies of
+# a syntax error rather than doing anything.
+asq() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# `set -u` turns a missing argument into "$1: unbound variable", three frames
+# away from the mistake. Say what the command wanted instead.
+req() {
+  local n="$1" usage="$2"; shift 2
+  [ "$#" -ge "$n" ] || { echo "usage: ssh-gui HOST $usage" >&2; exit 2; }
+}
+
+# Run AppleScript remotely, bounded. An Apple Event to an app without an
+# Automation grant blocks until the event times out (default 120 s) and only
+# then fails with -1712, because the consent dialog is waiting on a screen
+# nobody is looking at. Never send one unbounded.
+osa() {
+  local script_b64 secs="${SSH_GUI_AX_TIMEOUT:-15}"
+  script_b64=$(printf '%s' "$1" | base64)
+  rsh "S=\$(printf %s '$script_b64' | base64 -d); \
+       perl -e 'alarm $secs; exec @ARGV' osascript -e \"\$S\"" 2>&1
+}
+
+# Backing-scale factor of the main display, measured rather than assumed, so
+# this also works on 1x and on fractionally scaled displays. Cached remotely.
+# NOTE: screencapture silently refuses any destination whose basename starts
+# with a dot, and still exits 0. Every path below is therefore dot-free, and
+# success is checked by testing the file, never the exit status.
+scale() {
+  rsh "P=$RPFX; R=$RRUN; "'f=$P-scale.txt
+       if [ -s "$f" ] && [ $(( $(date +%s) - $(stat -f %m "$f") )) -lt 3600 ]; then
+         cat "$f"; exit 0
+       fi
+       rm -f "$R-probe.png"
+       screencapture -x -R0,0,100,100 -t png "$R-probe.png"
+       [ -s "$R-probe.png" ] || { echo "1.0"; exit 0; }
+       sips -g pixelWidth "$R-probe.png" |
+         awk "/pixelWidth/ {printf \"%.4f\", \$2/100}" | tee "$f"'
+}
+
+case "$CMD" in
+
+# ---------------------------------------------------------------- preflight
+# Everything that has to be true before a single click is worth sending.
+preflight)
+  rsh "R=$RRUN; "'echo "host:        $(scutil --get LocalHostName 2>/dev/null || hostname)"
+       echo "console user: $(stat -f%Su /dev/console)"
+       echo "screen locked: $(ioreg -n Root -d1 -a 2>/dev/null | plutil -extract IOConsoleLocked raw - 2>/dev/null || echo unknown)"
+       echo "screensaver:  $(pgrep -x ScreenSaverEngine >/dev/null && echo RUNNING || echo off)"
+       echo "human idle:   $(ioreg -c IOHIDSystem 2>/dev/null | awk "/HIDIdleTime/ {print int(\$NF/1000000000); exit}") s since last input"
+       echo "displaysleep: $(pmset -g | awk "/displaysleep/ {print \$2}")"
+       echo "cliclick:     $(command -v cliclick || echo MISSING)"
+       echo "geometry:     $(system_profiler SPDisplaysDataType 2>/dev/null | awk -F": " "/UI Looks like/ {print \$2; exit}")"
+       printf "accessibility: "
+       cliclick p >/dev/null 2>&1 && echo "ok (events post)" || echo "DENIED - grant Accessibility to the ssh binary"
+       printf "screen recording: "
+       rm -f "$R-tcc.png"
+       screencapture -x -t png "$R-tcc.png" >/dev/null 2>&1
+       [ -s "$R-tcc.png" ] && echo ok || echo "DENIED - grant Screen Recording to the ssh binary"
+       printf "apple events (System Events): "
+       perl -e "alarm 10; exec @ARGV" osascript -e "tell application \"System Events\" to return name of first application process whose frontmost is true" 2>&1'
+  ;;
+
+# -------------------------------------------------------------------- shot
+# Screenshot, downscaled to logical points so what you measure on the image is
+# what you pass to click. Optional region is given in logical points too.
+# ssh-gui HOST shot [out.png]
+# ssh-gui HOST shot -R x,y,w,h [out.png]
+shot)
+  region=""
+  if [ "${1:-}" = "-R" ]; then region="$2"; shift 2; fi
+  out="${1:-ssh-gui-shot.png}"
+  s=$(scale)
+  # `if !` rather than a bare command: under `set -e` a failing rsh aborted the
+  # script right here, after the redirection had already created "$out" — so
+  # the check below never ran and a 0-byte PNG was left for the agent to read.
+  if ! rsh "rm -f $RRUN-raw.png $RRUN-out.png
+       screencapture -x ${region:+-R$region} -t png $RRUN-raw.png 2>/dev/null
+       [ -s $RRUN-raw.png ] || { echo 'capture failed: no Screen Recording grant, or the screen is locked' >&2; exit 1; }
+       W=\$(sips -g pixelWidth $RRUN-raw.png | awk '/pixelWidth/{print \$2}')
+       T=\$(awk -v w=\"\$W\" -v s=\"$s\" 'BEGIN{printf \"%d\", (w/s)+0.5}')
+       sips --resampleWidth \$T $RRUN-raw.png --out $RRUN-out.png >/dev/null
+       cat $RRUN-out.png" > "$out"; then
+    rm -f "$out"
+    echo "shot failed" >&2
+    exit 1
+  fi
+  [ -s "$out" ] || { rm -f "$out"; echo "shot failed: empty image" >&2; exit 1; }
+  printf '%s  (%s logical points, backing scale %s)\n' \
+    "$out" "$(sips -g pixelWidth -g pixelHeight "$out" | awk '/pixelWidth/{w=$2} /pixelHeight/{print w"x"$2}')" "$s"
+  ;;
+
+# ---------------------------------------------------------------------- do
+# Batch cliclick commands in a single round trip. Args or stdin, one per line.
+# ssh-gui HOST do m:400,300 w:150 c:400,300
+# printf 'c:10,20\nt:hello\n' | ssh-gui HOST do
+do)
+  wait_ms="${SSH_GUI_WAIT:-40}"
+  if [ $# -gt 0 ]; then printf '%s\n' "$@"; else cat; fi |
+    rsh "cliclick -w $wait_ms -f -"
+  ;;
+
+# ------------------------------------------------------------------- click
+# Convenience: move, settle, click. Moving first makes hover-dependent targets
+# (menus, tooltips, custom controls) behave.
+click)
+  req 2 "click X Y" "$@"
+  printf 'm:%s,%s\nw:120\nc:%s,%s\n' "$1" "$2" "$1" "$2" | rsh "cliclick -f -"
+  ;;
+
+# -------------------------------------------------------------------- type
+# Types into whatever is frontmost. Unicode is fine. Activate the target app
+# first, and never send secrets this way.
+type)
+  req 1 "type TEXT" "$@"
+  printf 't:%s\n' "$1" | rsh "cliclick -f -"
+  ;;
+
+# ------------------------------------------------------------------- color
+# Three bytes instead of a screenshot. The cheapest way to verify that a click
+# landed, a dialog opened, or a state toggled.
+color)
+  req 2 "color X Y" "$@"
+  # Over stdin like every other cliclick verb. Interpolated into the remote
+  # command string, an argument carrying `;` or `$(…)` ran on the remote Mac.
+  printf 'cp:%s,%s\n' "$1" "$2" | rsh "cliclick -f -"
+  ;;
+
+# -------------------------------------------------------------------- idle
+# Seconds since the last *human* input. Note: your own synthetic events reset
+# this too, so read it before you start driving, not during.
+idle)
+  rsh 'ioreg -c IOHIDSystem 2>/dev/null | awk "/HIDIdleTime/ {print int(\$NF/1000000000); exit}"'
+  ;;
+
+# ---------------------------------------------------------------------- ax
+# Arbitrary AppleScript, bounded. Prefer System Events over talking to an app
+# directly: it is usually the only target with an Automation grant already.
+ax)
+  req 1 "ax APPLESCRIPT" "$@"
+  osa "$1"
+  ;;
+
+# --------------------------------------------------------------------- win
+# Front window bounds of an app, in logical points: "x y w h".
+win)
+  req 1 "win APP" "$@"
+  osa "tell application \"System Events\" to tell process \"$(asq "$1")\"
+         set p to position of front window
+         set s to size of front window
+         return (item 1 of p as text) & \" \" & (item 2 of p as text) & \" \" & (item 1 of s as text) & \" \" & (item 2 of s as text)
+       end tell"
+  ;;
+
+# -------------------------------------------------------------------- apps
+# Processes that actually have windows, i.e. things worth driving.
+apps)
+  osa 'tell application "System Events" to return name of every application process whose visible is true'
+  ;;
+
+# -------------------------------------------------------------------- menu
+# Click a menu path through the accessibility API instead of by coordinates.
+# ssh-gui HOST menu Safari File "New Window"
+menu)
+  req 3 "menu APP MENU ITEM" "$@"
+  app=$(asq "$1"); bar=$(asq "$2"); item=$(asq "$3")
+  osa "tell application \"System Events\" to tell process \"$app\"
+         set frontmost to true
+         click menu item \"$item\" of menu 1 of menu bar item \"$bar\" of menu bar 1
+       end tell"
+  ;;
+
+# ------------------------------------------------------------------ focus
+focus)
+  req 1 "focus APP" "$@"
+  osa "tell application \"System Events\" to set frontmost of process \"$(asq "$1")\" to true"
+  ;;
+
+# ------------------------------------------------------------------- close
+# Drop the multiplexed connection. Optional; it expires on its own.
+close)
+  ssh -o ControlPath="$SOCK" -O exit "$HOST" 2>/dev/null || true
+  echo "control socket closed"
+  ;;
+
+*)
+  echo "unknown command: $CMD" >&2
+  echo "commands: preflight shot do click type color idle ax win apps menu focus close" >&2
+  exit 2
+  ;;
+esac

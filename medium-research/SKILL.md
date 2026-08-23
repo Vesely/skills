@@ -135,6 +135,7 @@ Cap the "Other Candidates" table at the top 15 by score. If a subagent returned 
 
 - **DDG-only entries lack date metadata** so they pass the recency filter by default. They're penalized in scoring but can still reach top N. The subagent's `date` field (parsed from Freedium) is the source of truth.
 - **Title parsing for DDG-only entries.** DDG returns just URLs, not titles. Phase 2 fills titles from Freedium during extraction — empty titles in the Phase 1 JSON are expected, not a bug.
+- **Paywall status is no longer knowable.** The mirror's SvelteKit rewrite (2026-08) dropped the `Free: Yes/No` marker, so `paywall` comes back `None` on every article. Medium itself answers direct fetches with a Cloudflare 403 (even under a Googlebot UA) and its RSS feeds rate-limit to 429 after a few `discover.py` runs, so there is no cheap second source. Render the flag as unknown rather than guessing.
 - **Mirror flakiness.** Even when DNS resolves, the mirror sometimes returns truncated pages or rate-limits in bursts. The script returns `extraction_failed` with a `body_extraction_failed_or_short` reason. Treat as transient — a retry later usually works.
 
 ## Files in this skill
