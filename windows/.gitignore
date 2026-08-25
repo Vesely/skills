@@ -1,0 +1,10 @@
+# Your machine. Never shared.
+config.json
+
+# Recipes and notes you build yourself. They accumulate app coordinates, client
+# names and licence data that mean nothing (or worse) on another machine.
+/recipes/
+/notes/
+
+*.broken-*.json
+.DS_Store
