@@ -142,7 +142,7 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/wispr
   ```
 
-- **say** — Summarize the previous assistant message into a short spoken recap and play it aloud via Gemini TTS (Vertex AI, Czech voice Charon), automatically ducking background audio (Spotify / Music / browser). Falls back to macOS `say`. Provide Vertex service-account creds via the `GEMINI_SAY_ENV` file.
+- **say** — Summarize the previous assistant message into a short spoken recap and play it aloud via Gemini TTS (default) or an explicitly selected Atlas Cloud TTS provider, automatically ducking background audio. Falls back to macOS `say` from the Gemini route.
 
   ```
   npx skills@latest add Vesely/skills/say
