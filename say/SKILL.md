@@ -1,6 +1,6 @@
 ---
 name: say
-description: Summarize and simplify the last agent message, then speak it aloud via Gemini TTS (Vertex AI, voice Charon), in whatever language the user is using in the session. Falls back to sag/macOS say.
+description: Summarize and simplify the last agent message, then speak it aloud via Gemini TTS (Vertex AI, voice Charon) or the explicitly selected Atlas Cloud provider, in whatever language the user is using in the session. Falls back to sag/macOS say.
 allowed-tools:
   - Bash(bun:*)
   - Bash(sag:*)
@@ -33,7 +33,13 @@ Aim for **1–2 sentences (~15–30 words)** when it's just an outcome. If there
 
 **Success criteria**: A terse plain-text recap (≤3 sentences, no markdown/symbols) in the original language that still conveys what changed and any pending decision or next step.
 
-### 2. Speak it via Gemini TTS
+### 2. Choose the provider
+
+Use Gemini TTS by default. Use Atlas Cloud only when the user explicitly asks for Atlas or the session has already selected it; never switch providers automatically after an error.
+
+### 3. Speak it
+
+#### Gemini TTS (default)
 
 Run the helper — it synthesizes speech and auto-plays via `afplay`:
 
@@ -48,9 +54,25 @@ bun run ~/.claude/skills/say/gemini-say.ts "<recap, plain sentences>"
 - **Playback speed:** Charon reads a touch slowly, so playback is sped up ~1.07× via ffmpeg `atempo` (tempo only, pitch preserved — far cleaner than `afplay -r`). Override with `GEMINI_SAY_RATE` (`1.0` = off); needs `ffmpeg`, falls back to plain `afplay` without it.
 - **Audio ducking:** during playback the helper pauses other audio (Spotify / Music / browser / YouTube) via `nowplaying-cli` and resumes only what it paused — so the voice isn't a mishmash with background media. No-op if `nowplaying-cli` (Homebrew, optional) is absent or nothing is playing.
 
-**Fallbacks** (only if the helper errors): `sag --speed 1.1 "<recap>"` (ElevenLabs — may be quota-exhausted; add `--lang <code>` to force a language) or `say -r 188 "<recap>"` (macOS, low quality; add `-v <voice>` for a language-specific voice).
+#### Atlas Cloud (opt-in)
 
-**Success criteria**: the helper prints `OK …` and audio plays. Reply with one short confirmation line; do NOT embed a `MEDIA:` reference.
+Set `ATLASCLOUD_API_KEY`, then run the Atlas helper first without `--yes`. It checks the live Atlas model catalog, schema, supported voice, and current base price without creating a paid task:
+
+```bash
+bun run ~/.claude/skills/say/atlas-say.ts "<recap, plain sentences>" Charon --no-play
+```
+
+After the user confirms the displayed plan and price, rerun once with `--yes`:
+
+```bash
+bun run ~/.claude/skills/say/atlas-say.ts "<same recap>" Charon --yes
+```
+
+The helper submits exactly one generation request, polls only that prediction with bounded backoff, downloads the completed audio once, and auto-plays it. Use `--no-play` or `-o <path>` as needed. Do not retry `--yes` automatically after an uncertain response.
+
+**Gemini fallbacks** (only if the Gemini helper errors): `sag --speed 1.1 "<recap>"` (ElevenLabs — may be quota-exhausted; add `--lang <code>` to force a language) or `say -r 188 "<recap>"` (macOS, low quality; add `-v <voice>` for a language-specific voice). Do not use these to silently replace an explicitly selected Atlas request.
+
+**Success criteria**: the selected helper prints `OK …` and audio plays. Reply with one short confirmation line; do NOT embed a `MEDIA:` reference.
 
 ## Rules
 
