@@ -67,11 +67,26 @@
       "files": [],
       "expectations": [
         "The token/refresh/rotation design is routed to the session model or escalated to Fable (`model: \"fable\"`) — it is NOT routed to Sonnet",
-        "If Fable is proposed, it is justified as an escalation for the single hardest node, not applied to every subtask",
+        "If Fable is proposed, it is justified for the single hardest node only, not applied to every subtask",
         "The ~15 mechanical route-handler updates are routed to Sonnet and batched across a few agents rather than one agent per handler",
         "Shared/cross-cutting files (edge middleware, auth config) are reserved to a single owner or to the orchestrator, not edited by parallel agents",
         "Plan includes a Codex/GPT cross-model review pass, justified by the security-sensitive nature of the change",
         "The plan waits for the user's approval before launching, on its own initiative — the prompt never tells it to stop"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "fable-for-review-and-second-opinion",
+      "prompt": "The scheduling engine in src/scheduler/ works but it has grown into something nobody wants to touch — five overlapping strategy classes, a resolver that reads three config sources, and a retry path I'm not sure is correct. My session model is Opus 5. Nothing here is blocked or exceptionally hard, but before anyone touches it I want an independent design review proposing a simpler approach, plus a separate check of whether that retry path is actually correct. Split it across agents.",
+      "expected_output": "Recon/mapping of the current design routed to Sonnet or Explore; the design review and the 'simpler approach' question routed to exactly one Fable agent (`model: \"fable\"`) even though the task is not stuck; the retry-path correctness check kept on the session model or sent to Codex as code review rather than becoming a third Fable node; synthesis by the orchestrator; a compact plan shown before launching.",
+      "files": [],
+      "expectations": [
+        "Mapping/recon of the existing scheduler code is routed to Sonnet or to a read-only Explore agent, not to Fable",
+        "The plan assigns exactly one `model: \"fable\"` agent to the requested pre-implementation design review even though the task is not stuck or exceptionally hard — leaving that review on the inherited session model, or handing it to Codex, fails",
+        "Fable is capped at no more than two nodes and is not applied to every subtask",
+        "The retry-path correctness check is not a third Fable node: it stays on the session model or goes to Codex as code review",
+        "No specific Fable version string is pinned — the routing uses the `fable` alias",
+        "The final synthesis and recommendation are produced by the orchestrator itself, not delegated to a subagent"
       ]
     }
   ]
