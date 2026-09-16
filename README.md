@@ -10,6 +10,10 @@ npx skills@latest add Vesely/skills/<skill-name>
 
 Or via [skills.sh](https://skills.sh).
 
+**Claude Code:** Clone or copy the skill folder (e.g. `grokreview/`) to `~/.claude/skills/grokreview` or symlink so `~/.claude/skills/grokreview/SKILL.md` exists.
+
+**Codex / agentskills:** Use the same SKILL.md folder layout under your project's or user skills path.
+
 ## Skills
 
 ### Workflow
@@ -68,6 +72,12 @@ Or via [skills.sh](https://skills.sh).
 
   ```
   npx skills@latest add Vesely/skills/code-style
+  ```
+
+- **grokreview** — Trigger a GrokReview pass on the current GitHub PR by posting a tag comment (@GrokVesely / /grokreview). Lightweight trigger for GrokReview bot — detects the PR for the current branch, posts the trigger comment, and optionally waits for the review. Requires `gh` CLI.
+
+  ```
+  npx skills@latest add Vesely/skills/grokreview
   ```
 
 ### Security
