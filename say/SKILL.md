@@ -14,7 +14,7 @@ context: inline
 
 # Say
 
-Take the **last assistant message** in this conversation, compress it into a short, spoken-friendly recap, and play it aloud with the Gemini TTS helper. It auto-plays.
+Take the **last assistant message** in this conversation, compress it into a short, spoken-friendly recap, and play it aloud with the selected TTS helper (Gemini by default, Atlas Cloud only when explicitly requested). It auto-plays.
 
 ## Inputs
 
@@ -59,7 +59,7 @@ bun run ~/.claude/skills/say/gemini-say.ts "<recap, plain sentences>"
 Set `ATLASCLOUD_API_KEY`, then run the Atlas helper first without `--yes`. It checks the live Atlas model catalog, schema, supported voice, and current base price without creating a paid task:
 
 ```bash
-bun run ~/.claude/skills/say/atlas-say.ts "<recap, plain sentences>" Charon --no-play
+bun run ~/.claude/skills/say/atlas-say.ts "<recap, plain sentences>" Charon
 ```
 
 After the user confirms the displayed plan and price, rerun once with `--yes`:

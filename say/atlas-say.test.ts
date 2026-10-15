@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { generateAtlasSpeech, validateAtlasContract } from "./atlas-say";
+import { generateAtlasSpeech, runCli, validateAtlasContract } from "./atlas-say";
 
 const model = {
   model: "google/gemini-2.5-flash-tts",
@@ -113,5 +113,50 @@ describe("Atlas TTS", () => {
       maxPolls: 3,
     })).rejects.toThrow("prediction failed");
     expect(polls).toBe(1);
+  });
+
+  test("fails fast on a 4xx prediction poll instead of retrying", async () => {
+    let polls = 0;
+    const fetcher = async (url: string | URL | Request) => {
+      const value = String(url);
+      if (value.endsWith("/models")) return Response.json({ code: 200, data: [model] });
+      if (value === model.schema) return Response.json(schema);
+      if (value.endsWith("/generateAudio")) return Response.json({ code: 200, data: { id: "prediction-3" } });
+      polls += 1;
+      return new Response(null, { status: 401 });
+    };
+    await expect(generateAtlasSpeech("Hello", "Charon", "test-key", {
+      fetcher: fetcher as typeof fetch,
+      sleep: async () => {},
+      maxPolls: 5,
+    })).rejects.toThrow("HTTP 401");
+    expect(polls).toBe(1);
+  });
+
+  test("runCli without --yes never POSTs generateAudio", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalKey = process.env.ATLASCLOUD_API_KEY;
+    const originalLog = console.log;
+    const posts: string[] = [];
+    const logs: string[] = [];
+    process.env.ATLASCLOUD_API_KEY = "test-key";
+    console.log = (...items: unknown[]) => { logs.push(items.join(" ")); };
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const value = String(url);
+      if (init?.method === "POST") posts.push(value);
+      if (value.endsWith("/models")) return Response.json({ code: 200, data: [model] });
+      if (value === model.schema) return Response.json(schema);
+      return new Response(null, { status: 404 });
+    }) as typeof fetch;
+    try {
+      expect(await runCli(["Hello", "Charon"])).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.log = originalLog;
+      if (originalKey === undefined) delete process.env.ATLASCLOUD_API_KEY;
+      else process.env.ATLASCLOUD_API_KEY = originalKey;
+    }
+    expect(posts).toEqual([]);
+    expect(logs.join("\n")).toContain("PLAN");
   });
 });

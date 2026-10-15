@@ -17,7 +17,7 @@ function unwrap(body: any): any {
 
 async function jsonRequest(fetcher: FetchLike, url: string, init?: RequestInit): Promise<any> {
   const response = await fetcher(url, init);
-  if (!response.ok) throw new Error(`request failed with HTTP ${response.status}`);
+  if (!response.ok) throw Object.assign(new Error(`request failed with HTTP ${response.status}`), { status: response.status });
   const body = await response.json();
   if (body?.code !== undefined && !["0", "200"].includes(String(body.code))) {
     throw new Error(`Atlas API returned code ${body.code}`);
@@ -75,12 +75,14 @@ export async function generateAtlasSpeech(
         headers: { Authorization: `Bearer ${apiKey}` },
       }));
     } catch (error) {
-      if (attempt === maxPolls - 1) throw error;
+      const status = (error as { status?: number }).status;
+      const permanent = status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429;
+      if (permanent || attempt === maxPolls - 1) throw error;
       continue;
     }
     if (["completed", "succeeded"].includes(prediction?.status)) {
       const outputUrl = prediction?.outputs?.[0];
-      if (!outputUrl) throw new Error("completed Atlas prediction did not include an audio URL");
+      if (typeof outputUrl !== "string" || !outputUrl) throw new Error("completed Atlas prediction did not include an audio URL string in outputs[0]");
       return { outputUrl, predictionId, price };
     }
     if (prediction?.status === "failed") throw new Error("Atlas TTS prediction failed");
