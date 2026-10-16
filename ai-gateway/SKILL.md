@@ -21,7 +21,7 @@ A thin wrapper around the `ai-gateway` CLI (https://vercel.com/ai-gateway) for o
 
 ## Defaults
 
-- Text model: `xai/grok-4.1-fast-non-reasoning` (cheap + capable)
+- Text: explicitly select the latest available GPT frontier model using the procedure below; do not rely on the CLI default.
 - Image model: `google/imagen-4.0-fast-generate-001`
 - Video model: `xai/grok-imagine-video`
 - Override per-call with `-m <model-id>`. Browse with `ai-gateway models --type image|language|video`.
@@ -30,7 +30,7 @@ A thin wrapper around the `ai-gateway` CLI (https://vercel.com/ai-gateway) for o
 
 - Image-only: `bfl/flux-2-pro`, `bfl/flux-pro-1.1`, `openai/gpt-image-2`, `google/imagen-4.0-generate-001`, `xai/grok-imagine-image`.
 - Multimodal LLMs (auto-routed through chat completions): `google/gemini-2.5-flash-image` (Nano Banana), `google/gemini-3.1-flash-image-preview` (Nano Banana 2), `google/gemini-3-pro-image`.
-- Text quality: `anthropic/claude-opus-4.6`, `openai/gpt-5.4`, `xai/grok-4.3`.
+- Text quality: resolve the latest available GPT frontier model at run time; no fixed version.
 - Video: `xai/grok-imagine-video` (cheap), `bytedance/seedance-v1.0-lite-t2v`, `google/veo-3.1-fast-generate-001` (premium, audio), `klingai/kling-v2.6-t2v`.
 
 ## Steps
@@ -51,11 +51,19 @@ The CLI looks for the key in this order: `--key` flag → `AI_GATEWAY_API_KEY` e
 
 **Text** (streamed to stdout):
 
+Unless the user explicitly requests another model, run `ai-gateway models --type language`
+and select the latest GPT model identified as frontier or flagship for reasoning quality
+that is available through the Gateway. Do not infer recency from ID sorting or substitute
+a fast or lightweight model. If the catalog is inconclusive, check current official OpenAI
+model guidance, then confirm the exact `openai/...` ID in the Gateway catalog. If the choice
+cannot be verified, report the limitation rather than guessing or silently using the default.
+Set `TEXT_MODEL` to the verified ID before running the commands below.
+
 ```bash
-ai-gateway "<prompt>"                       # default model
-ai-gateway -m anthropic/claude-opus-4.6 "<prompt>"
-ai-gateway --json "<prompt>"                # full JSON response (.text, .usage)
-cat file.md | ai-gateway "<prompt>"         # piped stdin is prepended as context
+: "${TEXT_MODEL:?Set TEXT_MODEL to the verified Gateway GPT frontier model ID}"
+ai-gateway -m "$TEXT_MODEL" "<prompt>"
+ai-gateway -m "$TEXT_MODEL" --json "<prompt>"  # full JSON response (.text, .usage)
+cat file.md | ai-gateway -m "$TEXT_MODEL" "<prompt>"  # stdin is prepended as context
 ```
 
 **Image** (saves to disk, prints path):
@@ -85,7 +93,7 @@ ai-gateway video --json --duration 5 "<prompt>"                        # JSON wi
 
 ### 4. Report the result back
 
-For text: relay the model output to the user (it's already on stdout).
+For text: relay the output and record the selected model ID and selection source. Confirm the response used that model; report any mismatch.
 For image: report the absolute path(s) printed by the CLI. Do not re-encode or open the file unless asked.
 
 **Success criteria**: User has the answer/file path.
@@ -97,7 +105,7 @@ For image: report the absolute path(s) printed by the CLI. Do not re-encode or o
 - Video generation is slow (often 1-5 minutes) and requires a $10 minimum balance on the AI Gateway account. Don't kill the spinner — wait it out.
 - If the model id is unknown, run `ai-gateway models --search <substring>` to discover it instead of guessing.
 - Don't pass `--json` to the image/video command if the user wants a human-readable result; it suppresses the friendly "Saved: ..." lines.
-- The default text model is non-reasoning + fast; for harder reasoning tasks pick `xai/grok-4.1-fast-reasoning`, `anthropic/claude-opus-4.6`, or `openai/gpt-5.4` via `-m`.
+- Always pass the verified text model via `-m`; preserve an explicit user choice instead of overriding it with the frontier default.
 
 ## Troubleshooting
 
