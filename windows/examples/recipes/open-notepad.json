@@ -1,0 +1,63 @@
+{
+  "name": "open-notepad",
+  "aliases": [
+    "open notepad",
+    "notepad"
+  ],
+  "steps": [
+    {
+      "cmd": "mouse",
+      "args": [
+        "move",
+        700,
+        450
+      ]
+    },
+    {
+      "cmd": "mouse",
+      "args": [
+        "down"
+      ]
+    },
+    {
+      "cmd": "mouse",
+      "args": [
+        "up"
+      ]
+    },
+    {
+      "cmd": "press",
+      "args": [
+        "Control+Escape"
+      ]
+    },
+    {
+      "cmd": "sleep",
+      "args": [
+        800
+      ]
+    },
+    {
+      "cmd": "keyboard type",
+      "args": [
+        "notepad"
+      ]
+    },
+    {
+      "cmd": "press",
+      "args": [
+        "Enter"
+      ]
+    },
+    {
+      "cmd": "sleep",
+      "args": [
+        2000
+      ]
+    }
+  ],
+  "verify": "screenshot shows an empty Notepad window in the foreground",
+  "notes": "Reference example for the recipe format. The move/down/up at the top is the FOCUS TAP: it gives the browser canvas keyboard focus so keystrokes reach noVNC. It is not a click in the guest and must never be aimed at a control — see SKILL.md > Hard rules > 'Do not click in the guest through noVNC'. Emit the three calls together, nothing between them.",
+  "use_count": 0,
+  "last_verified": null
+}
