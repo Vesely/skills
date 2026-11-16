@@ -17,4 +17,4 @@ npx skills@latest add Vesely/skills/dynamic-agents
   - Codex: the Claude Code CLI (`claude`), logged in.
   - T3 Code: both providers enabled; the skill uses `delegate_task`.
 
-  Without it the skill falls back to a same-family review and says so.
+  Without it, Claude Code and Codex fall back to a same-family review and say so; T3 Code stops that review and asks which model to use instead.

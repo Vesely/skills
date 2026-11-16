@@ -13,7 +13,7 @@
         "Plan contains a per-subtask routing table (or equivalent) assigning a model/tier to each agent",
         "Judgment-heavy work (exporter design/implementation, final synthesis) is left on the session model with no model override",
         "The mechanical docs update is routed to the cheap tier of the session's family, or done inline by the orchestrator as too small for its own agent — it is not given a session-model child",
-        "Plan includes one cross-family review pass on the implementation, on the other vendor's model",
+        "Plan includes one cross-family review pass on the implementation, on the other vendor's model; where that reader is unavailable in the harness, the plan says so and follows the skill's unavailable-reader handling instead",
         "Topology is phased fan-out, not a persistent team",
         "The two shared wiring points (export menu component, report detail view) are assigned to a single owner or to the orchestrator's own synthesis step, rather than split across two agents editing them concurrently",
         "The plan waits for the user's approval before launching, on its own initiative — the prompt never tells it to stop",
@@ -30,7 +30,7 @@
       "expectations": [
         "Scanner agents are batched over the file set — roughly 4-8 agents partitioned across the ~40 files, NOT one agent per file and NOT an unbounded fan-out",
         "Cheap scanning/grepping work is routed to the cheap tier, or to a child that cannot write",
-        "Suspected findings are confirmed against the code by the orchestrator in its own loop before being reported as fact",
+        "The plan assigns confirmation of suspected findings to the orchestrator itself, before they are reported as fact",
         "The plan does NOT spawn separate verifier/adversarial-review subagents to check the scanners' findings",
         "Plan addresses coverage explicitly (what will and will not be covered, or how completeness is ensured)"
       ]
@@ -45,7 +45,7 @@
       "expectations": [
         "A compact plan is shown before launching",
         "The three research legs run in parallel as separate agents",
-        "The research legs are routed to the cheap tier (a defined question), not left on the session model",
+        "The research legs are routed to the cheap tier (a defined question); they stay on the session model only where the harness catalog identifies no cheap model, and the plan says so",
         "The run launches immediately after showing the plan — it does NOT stop to ask for approval or permission",
         "The final comparison table is synthesized by the orchestrator itself rather than delegated to a subagent"
       ]
@@ -77,7 +77,7 @@
         "If a peer reader is proposed, it is justified for the single hardest node only, not applied to every subtask",
         "The ~15 mechanical route-handler updates are routed to the cheap tier and batched across a few agents rather than one agent per handler",
         "Shared/cross-cutting files (edge middleware, auth config) are reserved to a single owner or to the orchestrator, not edited by parallel agents",
-        "Plan includes one cross-family review pass, justified by the security-sensitive nature of the change",
+        "Plan includes one cross-family review pass, justified by the security-sensitive nature of the change; where that reader is unavailable in the harness, the plan says so and follows the skill's unavailable-reader handling instead",
         "The plan waits for the user's approval before launching, on its own initiative — the prompt never tells it to stop"
       ]
     },
@@ -106,10 +106,10 @@
       "files": [],
       "expectations": [
         "Reads harness/codex.md (and harness/t3-code.md only if delegate_task is actually present) and says which tools made it choose",
-        "Scanners are batched (roughly 4-8 over ~40 files) and launched in waves that fit the session's concurrent-agent limit",
-        "Scanner calls use the native spawn tool with a fresh context (`fork_turns: \"none\"`), an explicit cheap model from the live catalog and an explicit reasoning effort",
+        "The plan batches scanners (roughly 3-8 over ~40 files) into waves that fit the session's concurrent-agent limit",
+        "Scanner calls use the native spawn tool with a fresh context (`fork_turns: \"none\"`), an explicit cheap model from the live catalog and an explicit reasoning effort; inheriting is acceptable only if the catalog identifies no cheap model and the plan says so",
         "States how read-only is enforced for scanners — a named agent config with a read-only sandbox, or 'by instruction only' — instead of implying a role name guarantees it",
-        "The follow-up goes to the same scanner through the native follow-up call that keeps its context, not to a freshly spawned child",
+        "The plan names the native follow-up call and sends it to the same scanner, reusing its context, not to a freshly spawned child",
         "Does NOT mention Agent, Explore, Sonnet, TaskStop, SendMessage, Workflow or codex:codex-rescue as things it will call",
         "Does not invent a close/stop step for children that have already reported"
       ]

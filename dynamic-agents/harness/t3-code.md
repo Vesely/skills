@@ -17,8 +17,9 @@ Which call for which child:
 - This replaces the native cross-family route: no `codex:codex-rescue` plugin from a Claude session, no `claude -p` from a Codex session.
 - A delegate gets only `task` — no history. It can read the repo, so paths are enough in a shared checkout. A `worktree` child starts from the parent commit and does not see uncommitted edits: commit first or inline the diff. `role` and `runtimeMode` do not make a child read-only; say so if it matters.
 - Completion wakes your thread. Follow the `next` field the call returns: do other work, do not poll or sleep, and end the turn when nothing else is left.
-- Fix small confirmed review findings yourself. A re-check or a second review is a new `delegate_task` with the brief, the findings and your objections — not a message into the old child thread. So delegates cannot form a persistent team: run rounds. Native children keep whatever follow-up your native file gives them.
+- Fix small confirmed review findings yourself. A re-check or a second review is a new `delegate_task` with the brief, the findings and your objections — not a message into the old child thread.
+- A larger fix goes back to the implementer that still has the context: `t3_thread_send` to its `childThreadId`, without `freshContext`, and keep the `taskId` it returns. Native children keep whatever follow-up your native file gives them.
 - A finished delegate needs no cleanup, and neither does a native child you waited on. Cancel a delegate you replace or no longer need with `task_cancel`.
-- If the provider or model you planned is unavailable, say so and stop that leg; do not switch provider or fall back on your own. Offer what else the catalog has and let the user choose.
+- If the provider or model you planned is unavailable, say so and stop that leg; do not switch provider or fall back on your own, not even to the same-family fallback in SKILL.md §2. Offer what else the catalog has and let the user choose.
 - Scripted pipelines (`Workflow`) only when the user asked for one.
 - When the plan needs approval, make sure the user can read all of it before you ask (`send_to_user` if you have it).
