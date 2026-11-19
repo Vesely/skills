@@ -1,32 +1,36 @@
 {
   "skill_name": "dynamic-agents",
+  "notes": "Expectations are written in roles so the same case can run in any harness. Cheap tier = Sonnet in a Claude session, the catalog's affordable model in a Codex session. Cross-family reader = GPT for a Claude session, Claude for a GPT session. `harness` says where a case is meaningful: `any` runs everywhere, the others need that harness's real tool list (run them there, as a dry run that writes the calls instead of making them).",
   "evals": [
     {
       "id": 0,
       "name": "feature-split-routing",
+      "harness": "any",
       "prompt": "I want to add a CSV export option to the reporting module of my web app. There is an existing PDF export service under src/services/export/ that the new CSV exporter should mirror, it needs to be wired into the export menu component AND the report detail view, and the user-facing docs page needs updating. Split this work between multiple agents and show me the plan first.",
-      "expected_output": "A decomposition with an agent plan table: exporter design/implementation on the session model (no override), the docs update routed to Sonnet, a Codex cross-model review pass, phased fan-out (not a team), the shared export-menu/report-view touchpoints owned by one agent, and a wait for approval because the run mutates files in parallel.",
+      "expected_output": "A decomposition with an agent plan table: exporter design/implementation on the session model (no override), the docs update routed to the cheap tier, a cross-family review pass, phased fan-out (not a team), the shared export-menu/report-view touchpoints owned by one agent, and a wait for approval because the run mutates files in parallel.",
       "files": [],
       "expectations": [
         "Plan contains a per-subtask routing table (or equivalent) assigning a model/tier to each agent",
         "Judgment-heavy work (exporter design/implementation, final synthesis) is left on the session model with no model override",
-        "The mechanical docs update is routed to Sonnet",
-        "Plan includes a Codex/GPT cross-model review pass on the implementation",
-        "Topology is phased fan-out, not a persistent team and not TeamCreate (which does not exist)",
+        "The mechanical docs update is routed to the cheap tier of the session's family, or done inline by the orchestrator as too small for its own agent — it is not given a session-model child",
+        "Plan includes one cross-family review pass on the implementation, on the other vendor's model; where that reader is unavailable in the harness, the plan says so and follows the skill's unavailable-reader handling instead",
+        "Topology is phased fan-out, not a persistent team",
         "The two shared wiring points (export menu component, report detail view) are assigned to a single owner or to the orchestrator's own synthesis step, rather than split across two agents editing them concurrently",
-        "The plan waits for the user's approval before launching, on its own initiative — the prompt never tells it to stop"
+        "The plan waits for the user's approval before launching, on its own initiative — the prompt never tells it to stop",
+        "Every tool, agent type and model ID in the plan exists in the harness the run is in — nothing borrowed from another harness's binding"
       ]
     },
     {
       "id": 1,
       "name": "audit-batching-and-sizing",
+      "harness": "any",
       "prompt": "Audit all API route handlers under src/api/ in this repo for missing tenant scoping (handlers that should go through the requireTenant middleware but don't). There are about 40 handler files. Fan out agents to cover it — give me your orchestration plan.",
-      "expected_output": "A plan with a small batched fan-out (roughly 4-6 scanners partitioned over the 40 files, not one agent per file), cheap scanning on Sonnet, suspected findings confirmed by the orchestrator itself rather than by spawned verifier agents, and an explicit coverage statement.",
+      "expected_output": "A plan with a small batched fan-out (roughly 4-6 scanners partitioned over the 40 files, not one agent per file), cheap scanning on the cheap tier, suspected findings confirmed by the orchestrator itself rather than by spawned verifier agents, and an explicit coverage statement.",
       "files": [],
       "expectations": [
         "Scanner agents are batched over the file set — roughly 4-8 agents partitioned across the ~40 files, NOT one agent per file and NOT an unbounded fan-out",
-        "Cheap scanning/grepping work is routed to Sonnet, or to a read-only Explore agent",
-        "Suspected findings are confirmed against the code by the orchestrator in its own loop before being reported as fact",
+        "Cheap scanning/grepping work is routed to the cheap tier, or to a child that cannot write",
+        "The plan assigns confirmation of suspected findings to the orchestrator itself, before they are reported as fact",
         "The plan does NOT spawn separate verifier/adversarial-review subagents to check the scanners' findings",
         "Plan addresses coverage explicitly (what will and will not be covered, or how completeness is ensured)"
       ]
@@ -34,13 +38,14 @@
     {
       "id": 2,
       "name": "small-run-no-over-gating",
+      "harness": "any",
       "prompt": "/dynamic-agents Research how three competitors — Linear, Height, and Shortcut — each handle recurring or repeating tasks in their product: which pricing tier it lands in, the UX for setting one up, and the known limitations. Give me a comparison table at the end.",
-      "expected_output": "A compact plan (three parallel research legs on Sonnet, synthesis by the orchestrator), then an immediate launch — no approval checkpoint, because this is a small, explicitly invoked, read-only fan-out with no file mutation.",
+      "expected_output": "A compact plan (three parallel research legs on the cheap tier, synthesis by the orchestrator), then an immediate launch — no approval checkpoint, because this is a small, explicitly invoked, read-only fan-out with no file mutation.",
       "files": [],
       "expectations": [
         "A compact plan is shown before launching",
         "The three research legs run in parallel as separate agents",
-        "The research legs are routed to Sonnet (a defined question), not left on the session model",
+        "The research legs are routed to the cheap tier (a defined question); they stay on the session model only where the harness catalog identifies no cheap model, and the plan says so",
         "The run launches immediately after showing the plan — it does NOT stop to ask for approval or permission",
         "The final comparison table is synthesized by the orchestrator itself rather than delegated to a subagent"
       ]
@@ -48,30 +53,98 @@
     {
       "id": 3,
       "name": "declines-fanout-not-worth-it",
+      "harness": "any",
       "prompt": "I need to rename the `isActive` prop to `isEnabled` across three React components and update their tests. Worth fanning this out across dynamic agents? Give me your recommendation, and the plan if it's worth it.",
-      "expected_output": "A recommendation against fanning out: the task is small enough that writing self-contained briefs costs more than doing it inline. At most one agent, no Workflow, no team, no Codex review pass.",
+      "expected_output": "A recommendation against fanning out: the task is small enough that writing self-contained briefs costs more than doing it inline. At most one agent, no pipeline tool, no team, no cross-family review pass.",
       "files": [],
       "expectations": [
         "Recommends against fanning this out across multiple agents",
         "Gives the reason in cost terms — briefing/orchestration overhead exceeds the work itself, or one agent can finish it inline",
         "Proposes at most one agent (or doing it directly in the main loop)",
-        "Does NOT propose the Workflow tool, a persistent team, or worktree isolation",
-        "Does NOT propose a Codex cross-model review pass for a change this small"
+        "Does NOT propose a scripted pipeline tool, a persistent team, or a separate checkout",
+        "Does NOT propose a cross-family review pass for a change this small"
       ]
     },
     {
       "id": 4,
       "name": "hard-node-escalation-and-gate",
+      "harness": "any",
       "prompt": "We're migrating auth from session cookies to JWT across a Next.js app. The token/refresh/rotation design is the genuinely hard part — we have SSR, edge middleware, and a mobile client sharing the same API, and getting rotation wrong logs everyone out. On top of that there are about 15 route handlers to mechanically update to the new helper, plus an auth docs page. Plan this across agents.",
-      "expected_output": "The token/rotation design stays on the session model or is escalated to Fable — never Sonnet. The ~15 route-handler updates are batched to Sonnet. Shared middleware/config is owned by one agent. A Codex cross-model review pass covers the security-sensitive implementation, and the run gates for approval before mutating files in parallel.",
+      "expected_output": "The token/rotation design stays on the session model or gets a peer-reader pass — never the cheap tier. The ~15 route-handler updates are batched to the cheap tier. Shared middleware/config is owned by one agent. A cross-family review pass covers the security-sensitive implementation, and the run gates for approval before mutating files in parallel.",
       "files": [],
       "expectations": [
-        "The token/refresh/rotation design is routed to the session model or escalated to Fable (`model: \"fable\"`) — it is NOT routed to Sonnet",
-        "If Fable is proposed, it is justified as an escalation for the single hardest node, not applied to every subtask",
-        "The ~15 mechanical route-handler updates are routed to Sonnet and batched across a few agents rather than one agent per handler",
+        "The token/refresh/rotation design is routed to the session model or to the peer reader — it is NOT routed to the cheap tier",
+        "If a peer reader is proposed, it is justified for the single hardest node only, not applied to every subtask",
+        "The ~15 mechanical route-handler updates are routed to the cheap tier and batched across a few agents rather than one agent per handler",
         "Shared/cross-cutting files (edge middleware, auth config) are reserved to a single owner or to the orchestrator, not edited by parallel agents",
-        "Plan includes a Codex/GPT cross-model review pass, justified by the security-sensitive nature of the change",
+        "Plan includes one cross-family review pass, justified by the security-sensitive nature of the change; where that reader is unavailable in the harness, the plan says so and follows the skill's unavailable-reader handling instead",
         "The plan waits for the user's approval before launching, on its own initiative — the prompt never tells it to stop"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "fable-for-review-and-second-opinion",
+      "harness": "claude-code",
+      "prompt": "The scheduling engine in src/scheduler/ works but it has grown into something nobody wants to touch — five overlapping strategy classes, a resolver that reads three config sources, and a retry path I'm not sure is correct. My session model is Opus 5. Nothing here is blocked or exceptionally hard, but before anyone touches it I want an independent design review proposing a simpler approach, plus a separate check of whether that retry path is actually correct. Split it across agents.",
+      "expected_output": "Any recon routed to Sonnet or Explore; the design review and the 'simpler approach' question routed to exactly one Fable agent (`model: \"fable\"`) even though the task is not stuck; the retry-path correctness check kept on the session model or sent to the cross-family reader as code review rather than becoming a second design-review Fable node; synthesis by the orchestrator; a compact plan shown before launching.",
+      "files": [],
+      "expectations": [
+        "Mapping/recon of the existing scheduler code, if split out at all, is routed to Sonnet or to a read-only Explore agent, not to Fable",
+        "The plan assigns exactly one `model: \"fable\"` agent to the requested pre-implementation design review even though the task is not stuck or exceptionally hard — leaving that review on the inherited session model, or handing it to the cross-family reader, fails",
+        "Fable is capped at no more than two nodes and is not applied to every subtask",
+        "The retry-path correctness check is not a third Fable node: it stays on the session model or goes to the cross-family reader as code review",
+        "No specific Fable version string is pinned — the routing uses the `fable` alias",
+        "The final synthesis and recommendation are produced by the orchestrator itself, not delegated to a subagent"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "codex-native-fanout-and-followup",
+      "harness": "codex",
+      "prompt": "Audit all API route handlers under src/api/ in this repo for missing tenant scoping (handlers that should go through the requireTenant middleware but don't). There are about 40 handler files. Fan out agents to cover it — give me your orchestration plan. After the scan I will want you to ask the scanner with the riskiest finding one follow-up question, so plan for that too.",
+      "expected_output": "Scanners batched and sized to the session's concurrency cap (waves), spawned with the native spawn tool on the catalog's affordable model with a fresh context and explicit effort, an honest statement of how read-only is enforced (a named read-only agent config, or by instruction only), a follow-up through the native follow-up call to the scanner that keeps its context, and no tool borrowed from Claude Code.",
+      "files": [],
+      "expectations": [
+        "Reads harness/codex.md (and harness/t3-code.md only if delegate_task is actually present) and says which tools made it choose",
+        "The plan batches scanners (roughly 3-8 over ~40 files) into waves that fit the session's concurrent-agent limit",
+        "Scanner calls use the native spawn tool with a fresh context (`fork_turns: \"none\"`), an explicit cheap model from the live catalog and an explicit reasoning effort; inheriting is acceptable only if the catalog identifies no cheap model and the plan says so",
+        "States how read-only is enforced for scanners — a named agent config with a read-only sandbox, or 'by instruction only' — instead of implying a role name guarantees it",
+        "The plan names the native follow-up call and sends it to the same scanner, reusing its context, not to a freshly spawned child",
+        "Does NOT mention Agent, Explore, Sonnet, TaskStop, SendMessage, Workflow or codex:codex-rescue as things it will call",
+        "Does not invent a close/stop step for children that have already reported"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "t3-worktrees-and-cross-family-review",
+      "harness": "t3-code",
+      "prompt": "/dynamic-agents Two independent changes in this repo: (A) add a token-bucket rate limiter in src/middleware/rateLimit.ts and wire it into the public API router, (B) add a CSV import endpoint under src/import/ with validation and tests. Both touch src/server/router.ts. Do them in parallel in separate checkouts, then get one review from the other model family before you merge. I've approved this approach, go ahead without asking.",
+      "expected_output": "Catalog lookup first, then two implementers started with delegate_task in separate worktrees on the session's own provider, the shared router file reserved for the orchestrator's sequential merge, one cross-family review on the other vendor's model with explicit effort, no approval stop, no polling.",
+      "files": [],
+      "expectations": [
+        "Calls `orchestrator_capabilities` before the first `delegate_task` and takes model IDs and option names from it",
+        "Both implementers are started with `delegate_task` and `isolation: \"worktree\"`, not with a native child sharing the checkout",
+        "The plan accounts for worktree children not seeing uncommitted edits (commit first, or inline what they need)",
+        "src/server/router.ts is reserved for a single owner or the orchestrator's merge step, and the merge is planned as sequential integration by the orchestrator",
+        "Exactly one cross-family review, on the other vendor's provider (Claude from a Codex session, Codex from a Claude session), with reasoning effort set explicitly",
+        "Does not stop for approval — the user already gave it — but still shows the plan",
+        "Does not poll, sleep or re-send into a child thread; follows the completion wake-up",
+        "Does not use codex:codex-rescue or `claude -p` for the review when delegate_task is available"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "cross-family-reader-unavailable",
+      "harness": "any",
+      "prompt": "/dynamic-agents I just finished a 14-file payments refactor on this branch (see git diff main). Get me a review from the other model family before I merge. Heads up: on this machine the other vendor's CLI and plugin are not installed and there is no delegate_task tool, so work with what you actually have.",
+      "expected_output": "States plainly that a cross-family review is unavailable here, does not invent a plugin, CLI or model, offers the fallback (a fresh-context same-family review, labelled as such) and never calls it a cross-model review.",
+      "files": [],
+      "expectations": [
+        "Says explicitly that the cross-family reader is unavailable in this environment",
+        "Does not plan a call to a plugin, CLI, tool or model ID that the prompt says is missing",
+        "Offers or runs the fallback: a fresh-context review on the session's own family (peer reader where one exists)",
+        "The fallback is labelled as a same-family review — nowhere presented as a cross-model or cross-family review",
+        "Does not fan out several reviewers over the same diff"
       ]
     }
   ]

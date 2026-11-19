@@ -1,0 +1,6 @@
+{
+  "_readme": "Copy to config.json and fill in vm_uuid + bundle. Get the UUID with: /Applications/UTM.app/Contents/MacOS/utmctl list — see references/config.md for every other key. config.json is gitignored; this file is not.",
+
+  "vm_uuid": "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
+  "bundle": "Windows.utm"
+}

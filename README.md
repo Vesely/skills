@@ -106,6 +106,12 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/ssh-gui
   ```
 
+- **windows** — Drive a Windows VM running in [UTM](https://mac.getutm.app) on macOS: start it, bridge its QEMU VNC port to noVNC, and control the guest from an `agent-browser` session. The VM can be on this Mac or on another one over SSH. Built out of eight months of finding out which parts of that stack lie to you — a half-click through noVNC can wedge *all* guest input until you send a bare `mouse up`, the VNC head serves one client so noVNC and `vncdo` cannot both have it, and which channel reaches the guest at all changes between sessions and between applications, so the skill probes instead of trusting a cached answer. Ships an atomic lock (the VM is a shared resource), a fast path that skips setup in ~0.3 s, and references for non-US guest keyboard layouts, UTM's WebDAV share and its failure modes, and building an in-guest agent. Everything machine-specific lives in a gitignored `config.json` — two fields to get started.
+
+  ```
+  npx skills@latest add Vesely/skills/windows
+  ```
+
 - **screencast** — Turn an agent-browser session into a polished product-demo video, fully local and free. Records the browser flow the agent drives, then composites an MP4 with auto zoom-to-click, an animated cursor + trail, click ripples, a keystroke overlay, idle trimming, chapters (lower-thirds + embedded MP4 chapters), and a gradient/rounded/shadowed frame. Screen-Studio-style output, produced by the agent. Requires agent-browser, ffmpeg, Node.
 
   ```
