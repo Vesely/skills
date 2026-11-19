@@ -32,7 +32,7 @@ Or via [skills.sh](https://skills.sh).
   npx skills@latest add Vesely/skills/cursor-agent
   ```
 
-- **tldr** — Compress the previous assistant response into a one-line TL;DR plus exactly three terse next-step labels (slash commands welcome). Triggers on `/tldr`, `/recap`, "tldr", "what should I do next".
+- **tldr** — Recap a session for someone coming back to it cold: a ✅/⚪ checklist of what already ran, a one- or two-sentence TL;DR, and up to three next-step labels (slash commands welcome). Triggers on `/tldr`, `/recap`, "tldr", "what should I do next".
 
   ```
   npx skills@latest add Vesely/skills/tldr
