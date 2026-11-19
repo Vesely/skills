@@ -1,22 +1,24 @@
 ---
 name: pr-handoff
 description: >-
-  Generates annotated browser screenshots of every UI change as the primary PR deliverable — plus an
-  optional GIF screencast for multi-step or animated flows — then writes a concise PR title and
-  description ready to paste into GitHub, and optional data-model documentation notes. Reviews the
-  current branch diff against the default branch, captures every affected user-facing surface with
-  the agent-browser CLI, marks the changed elements in red, stitches the shots into a collage with
-  ImageMagick, hosts it through a configured uploader (or leaves it local for drag-and-drop), and
-  embeds it in the PR body with per-panel captions. Use whenever the user wants to write a PR
-  description, document branch changes for a reviewer, create a PR writeup, prepare a handoff, or
-  says things like "write PR description", "prep the PR", "PR handoff", "document my changes",
-  "screenshot my PR", or "generate PR notes". Also trigger when the user just says "PR" in the
-  context of finishing or shipping work.
+  Builds the PR around annotated browser screenshots, with a short GIF when the changed behaviour
+  unfolds over time, then writes the shortest text that makes those visuals legible: a scannable,
+  ADHD-shaped description of captions and one-line bullets instead of a wall of prose. Reviews the
+  branch diff against the default branch, captures every affected user-facing surface with the
+  agent-browser CLI, marks the changed elements in red, stitches a collage with ImageMagick, hosts
+  it through a configured uploader (or leaves it local for drag-and-drop), embeds it in the PR body,
+  and adds data-model notes when the schema changes. Use whenever the user wants to write a PR
+  description, document branch changes for a reviewer, prepare a handoff, or says things like
+  "write PR description", "prep the PR", "PR handoff", "document my changes", "screenshot my PR",
+  or "generate PR notes". Also trigger when the user just says "PR" while finishing or shipping.
 ---
 
 # PR Handoff
 
-For any PR that touches the UI, **screenshots are the primary deliverable**. A reviewer grasps the change in seconds from an annotated screenshot — no amount of prose does that. Capture them before writing the description, and get them into the PR body yourself through one of the three routes in §2h — never as a follow-up comment. When none of those routes is available, §2h option 3 is the correct ending, not a failure.
+For any PR that touches the UI, **the visuals are the deliverable and the text is their caption**. A reviewer grasps the change in seconds from an annotated screenshot; no amount of prose does that. Two rules follow, and the rest of this file implements them:
+
+1. **Capture before you write.** Annotated stills of every changed surface, plus a short recording when the changed behaviour only exists over time (§2i). Get them into the PR body yourself through one of the three routes in §2h — never as a follow-up comment. When none of those routes is available, §2h option 3 is the correct ending, not a failure.
+2. **Write short.** Captions and one-line bullets, shaped for a reader with ADHD who is about to review code. §3 sets the budget.
 
 Scope: **GitHub + `gh`**. Other forges are out of scope.
 
@@ -24,12 +26,12 @@ Scope: **GitHub + `gh`**. Other forges are out of scope.
 
 | Tool | Needed for | Checked |
 |---|---|---|
-| `git`, `gh` (authenticated), `curl` | diff, PR create/edit, reachability | up front |
+| `git`, `gh` (authenticated), `curl` | diff, PR create/edit, reachability, attachment upload | up front |
 | `agent-browser` | every screenshot and screencast | only on UI PRs |
 | ImageMagick (`magick` or `convert`) | stitching the collage | only for 2+ shots |
-| `ffmpeg` | webm → GIF | only for screencasts |
+| `ffmpeg` | webm → MP4 or GIF | only for screencasts |
 | `gifski` | smaller, sharper GIFs | optional |
-| [`share-file`](https://github.com/Vesely/skills/tree/main/share-file) | hosting the image so GitHub can render it (§2h option 1) | optional, recommended |
+| [`share-file`](https://github.com/Vesely/skills/tree/main/share-file) | hosting an image that must also be readable off GitHub (§2h option 2) | optional |
 
 **Up-front check** — cheap, and a docs-only PR should never trigger a browser install:
 
@@ -188,6 +190,8 @@ Re-read the diff and list every URL where the change is visible:
 
 For each, plan the states worth capturing: default/empty, populated with realistic data, and the edge cases the diff implies (long text, missing value, error state).
 
+Decide the screencast here too, not at the end. Record when the **changed** behaviour unfolds over time or across states and stills would hide the transition between them: a wizard, a changed animation or transition, a streaming/progressive state, a drag, materially changed hover or click behaviour. Navigating to a surface and logging in are setup, not the change — they do not earn a GIF on their own. Plan the recording now so it happens in the same browser session instead of reopening one later.
+
 ### 2d. Capture each surface — annotate first, then shoot
 
 The order matters: a screenshot taken before the markup is injected is an unannotated screenshot.
@@ -203,6 +207,12 @@ agent-browser screenshot "$SHOTS/01-orders-list-default.png"
 Name pattern: `<NN>-<surface>-<state>.png` — zero-padded, so the collage orders itself.
 
 Always wait for async content before capturing: streamed responses, lazy sections, live previews. A spinner in a PR screenshot reads as a broken feature. Use `--full` for full scroll height when the change extends below the fold.
+
+**Shoot the result, not the trigger.** Build the shot list from the claim in the PR title: for each claim, name the visible evidence of the broken state and of the fixed state before you capture anything. An export-date fix needs the exported date on screen, a parsing-status fix needs the status. The dialog that starts the export and the list the document sits in prove neither. Where the claimed result has no surface in the app, capture the generated artifact itself — the XML, the file, the API response — and say in `Technical notes` which claim the screenshots do not cover. An adjacent screen is not a substitute. Measured on a PR whose two shots were the export dialog and the document list: a reviewer shown only the images could not tell what had changed at all.
+
+**Label the state inside the panel, before the shot.** Inject `BEFORE · broken` and `AFTER · fixed` into the page (tagged `data-prh-marker`, so §2e clears it again), and where two files, accounts or runs appear, the sample id beside it. Captions live in the body, and a reviewer reading the image alone never sees them — a panel only the caption can identify is unidentified. Measured: a before/after pair of totals where neither panel said which was which read as two unrelated results.
+
+**Both directions, both boundaries.** A fix that works in two directions gets a panel for each; a rule that separates valid input from invalid gets one example of each with its resulting status; a responsive fix gets the narrowest supported viewport and a value long enough to have broken it before. Two views of the same happy path are one case, not coverage.
 
 ### 2e. Annotation
 
@@ -254,6 +264,8 @@ Rules:
 
 Panels that go into the collage live in `$PANELS`; derived files never land back in the source directory, so a second run cannot stitch its own output.
 
+**Crop to the evidence, not to the component.** What stays: the changed value or control, whatever is needed to read it, and any conflicting value the reviewer has to resolve. What goes: unrelated rows, repeated list items, empty upload zones, document previews that prove nothing. A panel spending more than half its area on content unrelated to its own claim gets cropped again or split in two. Across seven PRs measured on their visuals alone, this was the most common complaint about otherwise correct captures.
+
 Copy each shot into `$PANELS`, cropping the ones that need it — geometry is per-surface, so pick it per file rather than applying one rectangle to everything:
 
 ```bash
@@ -297,24 +309,56 @@ Generating the collage is not the last step. **Judging it and correcting it is.*
 - **Colour semantics consistent** — every before marker red, every after marker green, no inverted panel.
 - **Nothing important obscured**, and no marker left over from a previous state.
 - **Text is readable at the size GitHub will render it.**
-- **Captions still match the panels** in order and description.
+- **Panel order matches the state plan** from §2c, so the captions written in §3d can follow it.
+- **The cover test** — hide the body text and look at the collage alone: does it say what changed, and what was broken before? That is the bar a reviewer actually applies. Measured on seven PRs, six needed the prose; the one that passed was a plain annotated before/after pair.
+- **State and sample are readable from the image itself** — `BEFORE`/`AFTER`, and which sample produced which panel wherever more than one appears.
+- **The result is on screen**, not only the control that triggers it.
+- **No unexplained contradiction** — an old value sitting beside the fixed one, an identifier that differs where the change claims a merge. Show which run produced which, or name the open question in `Technical notes`. Cropping the mismatch away is the failure, not the fix.
 
 If anything fails: adjust the geometry, re-run, Read it again. **Loop until every item passes.** Do not publish a collage you would not want a reviewer to see as-is — a visibly-off annotation makes the whole PR look careless and costs a round-trip with the user.
 
 ### 2h. Host the image
 
-**The invariant, which the three options below cannot override.** The image may leave this machine by exactly the three routes in this section and by no other. Everything else is out of bounds regardless of how the run is going: image hosts (catbox, imgur, litterbox, tmpfiles, 0x0.st and every sibling), gists, release assets, a bucket you pick, a `curl` you compose, committing the file to the PR branch, or `git add -f` past a `.gitignore`. Not embedding an image is an acceptable outcome; publishing one somewhere the user did not choose is not. Option 3 is always available and publishes nothing, so "everything else failed" is never a reason to improvise a fourth route. If the user explicitly asks for a public host, name exactly what becomes public and permanent, and get a yes for that specific upload first.
+**The invariant, which the three options below cannot override.** The image may leave this machine by exactly the three routes in this section and by no other. Everything else is out of bounds regardless of how the run is going: image hosts (catbox, imgur, litterbox, tmpfiles, 0x0.st and every sibling), gists, release assets, a bucket you pick, a `curl` you compose to a host of your own choosing, committing the file to the PR branch or to an assets branch, or `git add -f` past a `.gitignore`. Not embedding an image is an acceptable outcome; publishing one somewhere the user did not choose is not. Option 3 is always available and publishes nothing, so "everything else failed" is never a reason to improvise a fourth route. If the user explicitly asks for a public host, name exactly what becomes public and permanent, and get a yes for that specific upload first.
 
-Pick the destination by what the repo is:
+Route 1 is the default whatever the repo is. Visibility still decides whether route 2 is acceptable at all, because a `share-file` link to a private repo's screenshots is public where the repo is not — so have the answer before you fall back:
 
 ```bash
 gh repo view --json visibility -q .visibility     # PUBLIC | PRIVATE | INTERNAL
 ```
 
-**1. An uploader that was already installed and configured before this run.** `PR_HANDOFF_UPLOAD_CMD` if the user set one, otherwise the `share-file` skill if they have it:
+**1. GitHub's own attachment endpoint — the default for anything that goes into a GitHub body.**
+
+`gh` has no command for this, but the endpoint behind the web UI's drag-and-drop is callable directly, and it is the one route whose asset **inherits the repo's visibility**: on a private repo the URL 404s for everyone without access. That is what makes it right for the private case, which used to fall straight through to option 3. If the `gh-upload` skill is installed, invoke that instead of hand-rolling the call.
 
 ```bash
-IMG="$SHOTS/collage.png"     # or the single screenshot, or the GIF from 2i
+IMG="$SHOTS/collage.png"     # run this block once per artifact: the collage, then the video from 2i
+NAME="collage.png"           # display filename in the body — name what the reader is looking at
+MIME="image/png"             # must match NAME's extension, or the endpoint 422s
+
+REPO_ID="$(gh api repos/{owner}/{repo} --jq .id)"   # numeric; the GraphQL node id from
+                                                    # `gh repo view --json id` 404s here
+RESP="$(curl -s -X POST -H "Authorization: Bearer $(gh auth token)" -H "Accept: application/json" \
+  "https://uploads.github.com/user-attachments/assets?name=$NAME&content_type=$MIME&repository_id=$REPO_ID" \
+  --data-binary "@$IMG")"
+URL="$(printf '%s' "$RESP" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
+case "$URL" in https://github.com/user-attachments/*) ;; *) echo "upload failed: $RESP"; URL="" ;; esac
+echo "$URL"          # stash as COLLAGE_URL or FLOW_URL — one per artifact, see below
+```
+
+What actually goes wrong here:
+
+- **The extension in `name` must match `content_type`.** `name=collage` with no extension 422s every type. Percent-encode the query values too — `image/svg+xml` sent raw arrives as `image/svg xml`, and a space in `name` needs `%20`.
+- **Media only.** PNG, JPEG, GIF, WebP, SVG, MP4, WebM and MOV upload; PDF, text, zip and `application/octet-stream` 422. A non-media artifact belongs on option 2's host, linked rather than embedded.
+- **A 404 on the POST is one of two things** — a non-numeric `repository_id`, or a token without push access on the repo. Neither is worth retrying.
+- **Verifying the URL needs the header too.** A bare `curl` of a private repo's asset 404s by design and always will, so check it with `-H "Authorization: Bearer $(gh auth token)"` or you will read your own good upload as a failure.
+- **Embed the `github.com/user-attachments/…` URL, never the S3 URL it redirects to.** The redirect target is signed and expires in five minutes.
+- **There is no delete endpoint.** Every upload is permanent, which is where §0's real-data caveat bites hardest: look at the image before you send it.
+
+**2. An uploader that was already installed and configured before this run.** Route 1 covers the PR body; reach for this one when the image also has to be readable *outside* GitHub — pasted into an e-mail, a Slack thread, a message to a client — or when route 1 is closed because the token has no push access. `PR_HANDOFF_UPLOAD_CMD` if the user set one, otherwise the `share-file` skill if they have it:
+
+```bash
+IMG="$SHOTS/collage.png"     # run this block once per artifact: the collage, then the GIF from 2i
 
 UPLOADER="$PR_HANDOFF_UPLOAD_CMD"
 if [ -z "$UPLOADER" ]; then                                   # fall back to share-file
@@ -329,45 +373,19 @@ if [ -n "$UPLOADER" ]; then
   URL="$(sh -c "$UPLOADER \"\$1\"" _ "$IMG")" || URL=""
   case "$URL" in https://*) ;; *) URL="" ;; esac              # anything not a URL is a failure
 fi
+echo "$URL"          # stash as COLLAGE_URL or FLOW_URL — one per artifact, see below
 ```
 
 Contract: the uploader takes one file path and prints exactly one `https://` URL on stdout, nothing else, non-zero on failure. Flags are fine — it runs through `sh -c`, so `mytool upload --ttl 90d` works. [`share-file`](https://github.com/Vesely/skills/tree/main/share-file) meets this contract exactly and is the recommended default: it uploads to the user's *own* Cloudflare R2 bucket with a 90-day expiry, so the link is theirs to revoke and cleans itself up.
 
-**Neither one may be created during the run.** The variable must already be set in the environment you inherited, and `share-file` must already be installed *and* set up. You never export the variable, suggest a value for it, write the script it points at, install `share-file`, or run its `setup` — a route you construct yourself is your consent, not the user's, and that is the fourth route the invariant forbids. Missing both is a normal outcome that leads to option 2 or 3.
+**Neither one may be created during the run.** The variable must already be set in the environment you inherited, and `share-file` must already be installed *and* set up. You never export the variable, suggest a value for it, write the script it points at, install `share-file`, or run its `setup` — a route you construct yourself is your consent, not the user's, and that is the fourth route the invariant forbids. Missing both is a normal outcome that leads to option 3.
+
+**One upload per artifact, one variable each.** The collage and the GIF are two separate runs of this block. Keep the results apart — `COLLAGE_URL` for the stills, `FLOW_URL` for the GIF — and echo both before you write the body. Reusing `$URL` for the second upload is how a body ends up embedding the same image twice, or the collage under the flow caption.
 
 Two limits to keep in mind:
 
 - **Unlisted is not private.** A `share-file` URL is public to anyone holding it, just unguessable and expiring. That is far better than a permanent anonymous host, but it is not a private destination.
 - **Consent to the mechanism is not consent to the content.** When §0's real-data caveat applies — the shots show live customer data — get an explicit yes for *these images* before uploading, even though the uploader is configured.
-
-Note the expiry in the description (§3) whenever the host is time-limited, `share-file`'s 90-day default included.
-
-**2. Public repo, no uploader — an orphan assets branch (ask first).** Runs entirely in a throwaway worktree, so the user's working tree, branch and uncommitted changes are never touched. One `&&` chain, so a failure anywhere leaves `$URL` empty and drops you to option 3 instead of embedding a dead link:
-
-```bash
-git worktree prune                                  # clear worktrees left by a crashed run
-WT="$(mktemp -d)"; URL=""
-SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
-ASSET="pr/$SLUGBRANCH/$(basename "$IMG")"
-
-if git ls-remote --exit-code --heads origin pr-assets >/dev/null 2>&1; then
-  git fetch -q origin pr-assets && git worktree add -q --detach "$WT" origin/pr-assets
-else
-  git worktree add -q --detach "$WT" \
-    && git -C "$WT" checkout -q --orphan pr-assets-staging \
-    && git -C "$WT" rm -rq --cached .
-fi \
-  && mkdir -p "$WT/$(dirname "$ASSET")" && cp "$IMG" "$WT/$ASSET" \
-  && git -C "$WT" add "$ASSET" \
-  && git -C "$WT" commit -q --allow-empty -m "chore: PR assets for $BRANCH" \
-  && git -C "$WT" push -q origin HEAD:pr-assets \
-  && URL="https://raw.githubusercontent.com/$SLUG/pr-assets/$ASSET"
-
-git worktree remove --force "$WT" 2>/dev/null; git branch -qD pr-assets-staging 2>/dev/null
-[ -n "$URL" ] || echo "assets branch failed — use option 3"
-```
-
-Ask before doing this: it writes the image into the repository permanently, and git history is much harder to walk back than a deleted file. **Never on a private or internal repo** — GitHub's image proxy fetches without credentials, so a private `raw.githubusercontent.com` URL renders as a broken image for every reviewer.
 
 **3. Otherwise — keep it local and hand the upload to the user.** This is the correct outcome, not a failure. Write the Screenshots section with the captions already in place, so nothing is lost when the user drops the file in:
 
@@ -378,17 +396,23 @@ Ask before doing this: it writes the image into the repository permanently, and 
 
 1. **Order list, default** — unchanged baseline for comparison
 2. **Order list, filtered** — new date inputs outlined in red
+
+<!-- drag /absolute/path/to/flow.gif into this box -->
+
+3. **Export flow** — filter → export → download
 ```
 
-Print the absolute path and one line: *"Open the PR in the browser and drag this file where the comment is — GitHub hosts it on its own CDN, which is the one route that works for private repos too."*
+One placeholder per artifact, captions per §3d. Print each absolute path and one line: *"Open the PR in the browser and drag this file where the comment is — GitHub hosts it on its own CDN, which is the one route that works for private repos too."*
 
-Once `$URL` is set, hold it for step 3 and apply it with the rest of the body in one `gh pr edit <N> --body-file <file>` or `gh pr create --body-file <file>`. `--body-file` **replaces the entire description**, so on an existing PR read the current body first and merge your section into it — a reviewer's checklist or a linked issue must not disappear because you were asked for a description. Don't post the collage as a standalone `gh pr comment`.
+Once the URLs are set, hold them for step 3 and apply it with the rest of the body in one `gh pr edit <N> --body-file <file>` or `gh pr create --body-file <file>`. `--body-file` **replaces the entire description**, so on an existing PR read the current body first and merge your section into it — a reviewer's checklist or a linked issue must not disappear because you were asked for a description. Don't post the collage as a standalone `gh pr comment`.
 
-### 2i. Screencast (only for flows)
+### 2i. Screencast
 
-A still cannot show behaviour over time. Record **only** when the change is temporal: a multi-step flow or wizard, an animation, a progressive/streaming state, a drag or hover interaction. A static visual change needs no video.
+A still cannot show behaviour over time, so temporal changes get a GIF **as well as** the stills: a multi-step flow or wizard, a changed animation or transition, a progressive/streaming state, a drag, an interaction whose *point* is what happens after the click.
 
-**Produce a GIF, not an MP4.** GitHub plays inline video only for files on its own CDN (web-UI drag-drop, which `gh` cannot do); an external MP4 degrades to a bare link. A GIF embeds with `![]()` exactly like the collage and takes the same three routes in §2h.
+The test: **if annotated stills cannot show the changed behaviour without a paragraph of prose explaining it, record the GIF.** That paragraph is what the recording exists to delete. What fails the test needs no video — a restyled component, a new static section, a copy edit, or a dialog that merely opens on click, all of which read fine as before/after frames.
+
+**MP4 when the file stays on GitHub, GIF when it leaves.** GitHub mounts a player only for video on its own CDN, which is exactly where route 1 puts it — so with that route the recording ships as an MP4, embedded as a **bare URL alone on its own line**, because `![]()` around a video renders nothing at all. On route 2 the file sits on an external host, where an MP4 degrades to a bare link and only a GIF still plays; produce the GIF then. Route 3's drag-drop lands on GitHub's CDN, so either works there.
 
 With a session already open on the starting page:
 
@@ -397,67 +421,136 @@ agent-browser record start "$SHOTS/flow.webm"
 # ... drive one pass of the flow with the same open/click/fill commands used above ...
 agent-browser record stop
 
-# two-pass palette — a single-pass filter chain produces visibly dithered output
+# route 1 — H.264 in a yuv420p pixel format, which is what plays everywhere
+ffmpeg -i "$SHOTS/flow.webm" -c:v libx264 -pix_fmt yuv420p "$SHOTS/flow.mp4"
+
+# route 2 — two-pass palette; a single-pass filter chain produces visibly dithered output
 ffmpeg -i "$SHOTS/flow.webm" -vf \
   "fps=12,scale=900:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" \
   -loop 0 "$SHOTS/flow.gif"
 ```
 
-`-loop 0` means the finished GIF loops forever, which is what you want; record only **one** pass of the flow itself. Keep the file under ~5 MB — check it, and drop to `fps=10` or `scale=720:-1` if it is over:
+Record only **one** pass of the flow itself; `-loop 0` makes the GIF repeat it forever, and GitHub's player loops the MP4. Keep a GIF under ~5 MB — check it, and drop to `fps=10` or `scale=720:-1` if it is over. The MP4 of the same recording lands far smaller, so the cap rarely binds there:
 
 ```bash
-du -h "$SHOTS/flow.gif"
+du -h "$SHOTS/flow.gif" "$SHOTS/flow.mp4" 2>/dev/null
 ```
 
-Verify the GIF with the Read tool, host it through §2h (as `$IMG`), and embed it in the `## Screenshots` section alongside the stills with a one-line caption. It supplements the annotated stills; it does not replace them.
+Verify the recording with the Read tool, then run §2h again with `IMG` pointing at it and keep the result in `FLOW_URL` — a second artifact, not a replacement for the collage. Embed it in the `## Screenshots` section below the stills with its own one-line caption: `![…](URL)` for a GIF, the bare URL on its own line for an MP4.
 
-## 3. Write the PR description
+## 3. Write the PR text
 
-**Title** — one line, conventional-commit style, ≤70 characters:
+Write it after the collage and the GIF exist, not before.
+
+### 3a. Budget
+
+Counts of things, not a word total you cannot verify while writing:
+
+| Part | Default |
+|---|---|
+| Title | one line, ≤70 chars |
+| Summary | one sentence; a second only if it earns its place |
+| Content sections | 3 maximum — `Screenshots` and the conditional `Data model docs` don't count against it |
+| Bullets per section | 5 maximum, one line each |
+| Panel captions | one per panel, one line |
+
+That lands around 150 words of body on a UI PR and 250 on a backend-only PR, captions and image markup excluded. Those numbers are the target the counts produce, not a gate to squeeze under.
+
+**What the budget never cuts.** Operational and migration risk, rollout or feature-flag behaviour, backward compatibility, security implications, known regressions, testing gaps. Those live in `Technical notes` and stay there however long they run — a PR whose longest section is its risk notes is correctly written. Trim narration, never review-critical facts.
+
+Everything else: over budget means cut, not reformat.
+
+### 3b. Shape
+
+Title — conventional-commit style; `feat`, `fix`, `refactor`, `chore`, `docs`, scope in parentheses:
 
 ```
 feat(orders): add date range filter to the order list and CSV export
 ```
 
-`feat`, `fix`, `refactor`, `chore`, `docs`, with a scope in parentheses.
+Body — one sentence of orientation, then the pictures, then the short prose:
 
-**Body:**
-
-```
-Two or three sentences on what this PR does and why — the problem solved,
-not the list of files changed.
+```markdown
+Order lists could not be narrowed by date, so month-end reconciliation meant exporting everything.
 
 ## Screenshots
-<!-- UI PRs only: collage (+ flow GIF from 2i) and one caption per panel -->
 
-## [Header 1 — the main change]
-- outcome-focused bullet ("Admins can filter the order list by date range")
-- not implementation-focused ("Added date_from to the queryset")
+![Order list with the new date range filter](COLLAGE_URL)
 
-## [Header 2 — second area, if any]
+1. **Order list, default** — unchanged baseline for comparison
+2. **Order list, filtered** — new date inputs outlined in red
 
-## [Technical notes — decisions, libraries, infrastructure, if any]
+## Filtering
+- Admins can filter the order list by date range
+- Empty result shows a new empty state instead of a blank table
+
+## Technical notes
+- Filters on `created_at`; defaults to the last 30 days
 ```
 
-Guidelines:
+That single leading sentence is not decoration. GitHub reuses the body in places that render no images at all — e-mail notifications, the API, and squash/merge commit messages — and a body opening with `![...](https://…)` tells those readers nothing. One sentence, then the visuals dominate everything below.
 
-- Three headers maximum. Merge small items rather than splitting into four.
-- Architectural and dependency decisions go under "Technical notes", not mixed into feature bullets.
-- The `## Screenshots` section sits right after the summary — the first thing a reviewer sees.
+Give the image real alt text — `![Billing settings, invoice list and plan-change dialog](URL)`, not `![Collage](URL)`. It is what a reviewer on a broken connection, on mobile data, or after the host expiry sees.
 
-**Captions are mandatory**, whether the image is embedded or still waiting to be dragged in. A collage with no captions makes the reviewer guess what each panel proves. Mirror the state plan from §2c:
+Architectural and dependency decisions go under `Technical notes`, never mixed into feature bullets. On a backend-only PR there is no `## Screenshots` section and the summary may run to two sentences, because nothing else orients the reviewer.
+
+### 3c. Shaped for a reader with ADHD
+
+A PR-body adaptation of the `i-have-adhd` style. Its interactive rules — restate state each turn, give time estimates, end on a next action — do not apply to a PR description. These do:
+
+**Cut**
+
+- Preamble. Banned openers: "This PR", "This change introduces", "In this pull request", "As part of", "In order to". Start with the thing itself.
+- Recaps and closers. Nothing restating the bullets above it, no "Let me know if…".
+- Empty hedging — "should now", "hopefully", "various improvements". Real uncertainty is different; it stays, named.
+- Idiom. "Falls back to the cached list" beats "gracefully degrades".
+
+**Shape**
+
+- One line, one fact. A bullet carrying two independent facts is two bullets — or one bullet and a cut.
+- Concrete over abstract: names, paths, numbers. "Filters by `created_at`, defaults to the last 30 days" beats "improved filtering capabilities".
+- Cap every list at 5. Past five, split into what matters for review and what is incidental, then drop the incidental.
+
+**Keep**
+
+- What a panel cannot show: why, the trade-off, what this replaces, permissions, defaults, accessibility and responsive behaviour.
+- Limitations, stated flat: what is untested, what was only verified by hand, what the reviewer should check locally. "Not tested on Safari" is worth more than a paragraph of confidence.
+
+### 3d. Captions do the explaining
+
+**Captions are mandatory**, whether the image is embedded or still waiting to be dragged in. A collage without captions makes the reviewer guess what each panel proves. Mirror the state plan from §2c, one line per panel, in panel order, and give each artifact its own block:
 
 ```markdown
 ## Screenshots
 
-![Collage](URL)
+![Order list, filtered and empty states](COLLAGE_URL)
 
 1. **Order list, default** — unchanged baseline for comparison
 2. **Order list, filtered** — new date inputs outlined in red
 3. **Empty result** — new empty state instead of a blank table
+
+![Export flow, four steps](FLOW_URL)
+
+4. **Export flow** — filter → export → download
 ```
 
-If the image is hosted somewhere that expires, say so in that section so the reviewer knows the embed is impermanent.
+If a host expires, say so in this section so the reviewer knows the embed is impermanent — `share-file`'s 90-day default included.
+
+### 3e. Trim pass before publishing
+
+Read the body back once and delete:
+
+1. The first sentence, if it announces the PR ("This PR adds…") instead of naming the problem or the outcome.
+2. Any sentence re-describing what a panel already shows.
+3. Any bullet naming a file or function without saying what changed for the user.
+4. Empty hedges and idioms.
+5. The last sentence, if it recaps or offers.
+
+Then three checks:
+
+- **Captions match panels** in order and description. §2g fixed the panel order; the captions are written here, so this is the first point at which they can be compared.
+- **Each artifact appears once, under its own caption.** `COLLAGE_URL` and `FLOW_URL` are two different URLs — a body embedding one of them twice is the §2h variable bug, not a caption bug.
+- **Skim test:** reading only the summary sentence, the captions and the headers, does the reviewer know what changed and where to look in the diff? If a *visible* change still needs a paragraph to be identifiable, fix the annotation or the caption (§2e, §3d) rather than adding prose. Facts no screenshot could carry — risk, architecture, compatibility — are supposed to be text. Leave them.
 
 ## 4. Data model documentation (conditional)
 
@@ -476,17 +569,17 @@ Flag destructive changes explicitly:
 **Operational risk:** [drops column X / adds NOT NULL to a populated table / needs a backfill]
 ```
 
-No schema change: omit the section entirely. Do not mention migrations in passing just to acknowledge them.
+One line per field, no prose wrapped around it. No schema change: omit the section entirely. Do not mention migrations in passing just to acknowledge them.
 
 ## 5. Final output
 
-Present:
+What you tell the user follows the same shape as what you wrote into the PR: the link or the file path first, prose after — and no recap of the steps you just ran.
 
-1. **PR title** — pasted, or already applied via `gh pr create`
-2. **Screenshots** — the hosted URL now embedded in the body, or the local path plus the one-line drag-drop instruction
-3. **PR description** — in a code block if the PR does not exist yet, otherwise confirmation that it is live
-4. **Data model notes**, if any
-5. **Anything skipped and why** — dev server unreachable, no ImageMagick, real customer data in the shots
+1. **The PR URL**, or the title + body in one code block if the PR does not exist yet
+2. **What the user still has to do**, if anything — usually "drag `<abs path>` into the PR body", one line per artifact (§2h option 3). If there is nothing, say the visuals are live in the body.
+3. **Anything skipped and why**, one line each — dev server unreachable, no ImageMagick, real customer data in the shots, screencast dropped because ffmpeg is missing
+
+Nothing else. Do not paste the description back when it is already published, do not list the surfaces you captured — the collage shows them.
 
 Then clean up. `$SHOTS` holds full-resolution screenshots of the app, which may show real customer data:
 
